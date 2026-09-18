@@ -101,16 +101,105 @@ English-Windish/
 - [x] 编写 `.env.example`（API Key 模板）
 - [x] 编写 `requirements.txt`
 - [x] 建立模块化目录骨架
-- [ ] **首次 Git 提交并推送到 GitHub**（待办）
+- [x] **编写核心代码**（见下）
+- [x] **27 个单元测试全部通过**
+- [x] **首次 Git 提交**（commit `ce62043`）
+- [ ] 推送到 GitHub（SSH key 待添加到账号）
+
+### 核心代码实现
+
+| 文件 | 职责 | 关键设计 |
+|---|---|---|
+| `src/config.py` | 配置管理 | Key 只从环境变量读；缺失时给中文提示而非抛裸异常 |
+| `src/models.py` | 数据模型 | 用 dataclass 而非 dict，字段有名字、类型明确 |
+| `src/llm_client.py` | 模型调用封装 | 屏蔽三家服务商差异；指数退避重试；JSON 提取容错 |
+| `src/prompts.py` | Prompt 模板 | 集中管理，可单独迭代评审 |
+| `src/ocr/recognizer.py` | 图片识别 | 多模态直读，不用传统 OCR |
+| `src/grammar/analyzer.py` | 语法解析 | 分块处理 + 幻觉片段过滤 + 缩写保护切分 |
+| `src/vocabulary/tutor.py` | 单词精讲 | 两级筛选 + 并发请求 + SQLite 缓存 |
+| `src/report/generator.py` | 报告渲染 | 本地模板渲染，不让模型再写一遍 |
+| `src/main.py` | 命令行入口 | 支持 `--text` 调试模式，免图片测试 |
+
+### 几个值得说明的技术点
+
+**1. JSON 提取容错**
+
+大模型返回 JSON 时极不老实，实测常见三种污染：
+- 裹在 ` ```json ... ``` ` 代码块里
+- 前后加"好的，以下是分析结果："这类废话
+- 字符串值里含花括号，导致简单正则匹配出错
+
+解决方案是**括号配对扫描**：逐字符遍历，跟踪 `depth` 和 `in_string` 状态，
+正确处理转义和字符串内的括号。比正则可靠得多。测试覆盖了 8 种污染场景。
+
+**2. 幻觉过滤**
+
+语法标注的 `text` 字段必须能在原句中精确找到，否则直接丢弃。
+实测效果：模型会自作主张地把 `be accustomed to` 改写成 `be accustomed to doing`，
+这类改动会导致前端无法定位高亮位置。过滤掉比强行渲染更安全。
+
+**3. 缩写保护切分**
+
+按句末标点切句时，`Mr.` / `U.S.` / `Dr.` / `etc.` 会被误判为句末。
+方案是先把缩写替换成占位符，切分完再还原。测试验证了
+`Mr. Smith went to the U.S. last year.` 不会被切成两句。
+
+**4. 测试策略：不调真实 API**
+
+所有单元测试都是纯逻辑测试，不发起网络请求。理由：
+- 调 API 的测试慢且花钱
+- 结果不确定（大模型输出有随机性）
+- CI 环境没有 API Key
+
+把可测的逻辑抽成纯函数，是工程上的标准做法。
+
+---
+
+## 2026-09-19 · 阶段 0 收尾：GitHub 推送踩坑
+
+### 问题现象
+
+HTTPS 推送 GitHub 失败，报错依次为：
+
+```
+schannel: server closed abruptly (missing close_notify)
+fatal: unable to access ... : Empty reply from server
+OpenSSL SSL_read: unexpected eof while reading, errno 0
+```
+
+### 排查过程
+
+1. **测网络连通性**：`curl https://github.com` 返回 `200`（0.7s），网页通道正常
+2. **排除偶发**：重试仍失败，不是抖动
+3. **切换 TLS 后端**：`http.sslBackend=openssl` 后报 `unexpected eof`，
+   说明不是 schannel 独有的问题
+4. **结论**：中间网络设备在干扰 TLS 握手，尤其是涉及大流量上传时
+
+### 解决方案：改用 SSH
+
+- 测试端口：`github.com:22` 通，`ssh.github.com:443` 也通
+- 生成密钥：`ssh-keygen -t ed25519`（Windows 上没有现成密钥）
+- 写 `~/.ssh/config` 指定 `IdentityFile` 和 `IdentitiesOnly yes`
+- 远程地址改为 `git@github.com:windone286-arch/English-Windish.git`
+- SSH 认证测试：`Permission denied (publickey)` —— 通道正常，待添加公钥到账号
+
+### 经验总结
+
+**在国内网络环境下，GitHub 走 SSH 比 HTTPS 稳定得多。**
+HTTPS 的 TLS 握手容易被中间设备干扰，而 SSH 是二进制协议，特征不明显，
+不容易被针对性干扰。这个配置一次做好，以后所有仓库都受益。
+
+配置 SSH 只需三步：
+1. `ssh-keygen -t ed25519 -C "邮箱"`
+2. 把 `~/.ssh/id_ed25519.pub` 的内容贴到 GitHub → Settings → SSH keys
+3. `git remote set-url origin git@github.com:用户名/仓库名.git`
 
 ### 下一步
 
-阶段 1：实现核心功能命令行版本——
-
-1. 图片输入 → 调用视觉模型识别文本
-2. 识别文本 → 调用文本模型做语法解析
-3. 语法解析结果 → 知识点抽取 → 单词精讲
-4. 输出结构化 JSON 报告
+阶段 1 续：
+1. 用户申请通义千问 API Key
+2. 用真实试卷照片跑通全链路
+3. 根据实际输出质量迭代 Prompt
 
 ---
 
