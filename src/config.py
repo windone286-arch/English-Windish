@@ -38,7 +38,11 @@ class Config:
     """
 
     # ---- 模型服务商 ----
-    llm_provider: str = "dashscope"
+    # 支持「视觉」与「文本」使用不同的服务商。
+    # 原因：DeepSeek 推理强但**没有视觉模型**，所以图片识别必须用别家。
+    # 这是本项目的一个重要设计决策，详见 docs/devlog.md
+    vision_provider: str = "dashscope"
+    text_provider: str = "deepseek"
 
     # ---- API Keys ----
     dashscope_api_key: str = ""
@@ -47,7 +51,11 @@ class Config:
 
     # ---- 模型名称 ----
     vision_model: str = "qwen-vl-max"
-    text_model: str = "qwen-plus"
+    text_model: str = "deepseek-chat"
+
+    # ---- 自定义 API 地址（用于第三方中转站）----
+    # 留空则使用代码内置的官方地址
+    deepseek_base_url: str = ""
 
     # ---- 运行配置 ----
     debug: bool = True
@@ -75,7 +83,7 @@ class Config:
         """获取指定服务商的 API Key。
 
         Args:
-            provider: 服务商名称，默认使用配置中的 llm_provider
+            provider: 服务商名称。默认使用 text_provider
 
         Returns:
             API Key 字符串
@@ -83,7 +91,7 @@ class Config:
         Raises:
             ValueError: 服务商不支持，或 Key 未配置
         """
-        provider = provider or self.llm_provider
+        provider = provider or self.text_provider
 
         key_map = {
             "dashscope": (self.dashscope_api_key, "DASHSCOPE_API_KEY", "阿里通义千问"),
@@ -108,6 +116,31 @@ class Config:
 
         return key
 
+    def validate(self) -> list[str]:
+        """校验配置完整性，返回问题列表（空列表表示没问题）。
+
+        会分别检查视觉和文本两个环节的 Key 是否就位，
+        因为本项目允许两者使用不同的服务商。
+        """
+        problems: list[str] = []
+
+        for role, provider in (
+            ("视觉（图片识别）", self.vision_provider),
+            ("文本（语法分析/单词精讲）", self.text_provider),
+        ):
+            try:
+                self.get_api_key(provider)
+            except ValueError as exc:
+                problems.append(f"【{role}】{exc}")
+
+        if self.vision_provider == "deepseek":
+            problems.append(
+                "【配置错误】DeepSeek 没有视觉模型，无法用于图片识别。\n"
+                "  请把 VISION_PROVIDER 改为 dashscope 或 zhipu。"
+            )
+
+        return problems
+
     @classmethod
     def from_env(cls) -> "Config":
         """从环境变量创建配置对象。"""
@@ -115,13 +148,30 @@ class Config:
 
         debug_raw = os.getenv("DEBUG", "true").strip().lower()
 
+        # 视觉服务商默认 dashscope；若用户只配了智谱，则自动切到智谱
+        default_vision = (
+            "dashscope" if os.getenv("DASHSCOPE_API_KEY") else (
+                "zhipu" if os.getenv("ZHIPU_API_KEY") else "dashscope"
+            )
+        )
+
+        vision_provider = os.getenv("VISION_PROVIDER", default_vision).strip()
+
+        # 视觉模型名与服务商匹配（用户没显式指定时）
+        default_vision_model = {
+            "dashscope": "qwen-vl-max",
+            "zhipu": "glm-4v-plus",
+        }.get(vision_provider, "qwen-vl-max")
+
         return cls(
-            llm_provider=os.getenv("LLM_PROVIDER", "dashscope").strip(),
+            vision_provider=vision_provider,
+            text_provider=os.getenv("TEXT_PROVIDER", "deepseek").strip(),
             dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", "").strip(),
             zhipu_api_key=os.getenv("ZHIPU_API_KEY", "").strip(),
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
-            vision_model=os.getenv("VISION_MODEL", "qwen-vl-max").strip(),
-            text_model=os.getenv("TEXT_MODEL", "qwen-plus").strip(),
+            vision_model=os.getenv("VISION_MODEL", default_vision_model).strip(),
+            text_model=os.getenv("TEXT_MODEL", "deepseek-chat").strip(),
+            deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "").strip(),
             debug=debug_raw in ("true", "1", "yes", "on"),
         )
 

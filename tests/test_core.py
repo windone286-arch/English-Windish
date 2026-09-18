@@ -35,6 +35,85 @@ from src.report.generator import ReportGenerator  # noqa: E402
 
 
 # ======================================================================
+# 配置
+# ======================================================================
+
+
+class TestConfig:
+    """配置模块测试。
+
+    重点验证「视觉与文本分离」这一设计——这是本项目的关键决策，
+    因为 DeepSeek 有很强的文本能力但没有视觉模型。
+    """
+
+    def test_get_api_key_unknown_provider(self):
+        from src.config import Config
+
+        config = Config()
+        with pytest.raises(ValueError, match="不支持的服务商"):
+            config.get_api_key("不存在的服务商")
+
+    def test_get_api_key_missing_gives_chinese_hint(self):
+        from src.config import Config
+
+        config = Config()
+        with pytest.raises(ValueError) as exc_info:
+            config.get_api_key("deepseek")
+
+        message = str(exc_info.value)
+        assert "未配置 DeepSeek" in message
+        assert ".env" in message
+        assert "DEEPSEEK_API_KEY" in message
+
+    def test_get_api_key_returns_configured_key(self):
+        from src.config import Config
+
+        config = Config(deepseek_api_key="sk-test-123")
+        assert config.get_api_key("deepseek") == "sk-test-123"
+
+    def test_default_providers_split(self):
+        """默认配置应该是视觉 dashscope + 文本 deepseek。"""
+        from src.config import Config
+
+        config = Config()
+        assert config.vision_provider == "dashscope"
+        assert config.text_provider == "deepseek"
+
+    def test_validate_reports_both_missing_keys(self):
+        from src.config import Config
+
+        config = Config()
+        problems = config.validate()
+        # 两个 Key 都没配，应该报两条
+        assert len(problems) == 2
+        assert any("视觉" in p for p in problems)
+        assert any("文本" in p for p in problems)
+
+    def test_validate_rejects_deepseek_as_vision(self):
+        """把 DeepSeek 配成视觉服务商时，必须给出明确错误。"""
+        from src.config import Config
+
+        config = Config(
+            vision_provider="deepseek",
+            deepseek_api_key="sk-test",
+            text_provider="deepseek",
+        )
+        problems = config.validate()
+        assert any("没有视觉模型" in p for p in problems)
+
+    def test_validate_passes_when_configured(self):
+        from src.config import Config
+
+        config = Config(
+            vision_provider="dashscope",
+            text_provider="deepseek",
+            dashscope_api_key="sk-vision",
+            deepseek_api_key="sk-text",
+        )
+        assert config.validate() == []
+
+
+# ======================================================================
 # 数据模型
 # ======================================================================
 

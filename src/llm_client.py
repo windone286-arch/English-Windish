@@ -33,17 +33,62 @@ ENDPOINTS = {
     "deepseek": "https://api.deepseek.com/chat/completions",
 }
 
+# 支持 response_format={"type": "json_object"} 的服务商
+# DeepSeek 的 API 不接受这个参数，传了会报错
+JSON_MODE_SUPPORTED = {"dashscope", "zhipu"}
+
+# 各家支持视觉的模型前缀，用于提前拦截「用文本模型读图」这类配置错误
+VISION_MODEL_PREFIXES = ("qwen-vl", "qwen2-vl", "qwen3-vl", "glm-4v", "gpt-4", "claude-")
+
 
 class LLMError(Exception):
     """大模型调用异常。"""
 
 
 class LLMClient:
-    """大模型客户端。"""
+    """大模型客户端。
+
+    支持「视觉」与「文本」走不同的服务商——这是本项目的核心配置策略。
+    例如：用通义千问的 qwen-vl-max 读图，用 DeepSeek 做语法分析。
+    每次调用时指定 role，客户端会自动挑选对应的服务商、Key 和模型。
+    """
 
     def __init__(self, config: Config | None = None, timeout: float = 120.0):
         self.config = config or get_config()
         self.timeout = timeout
+
+    def _resolve(
+        self, role: str, model: str | None
+    ) -> tuple[str, str, str]:
+        """根据角色解析出 (provider, api_key, model)。
+
+        Args:
+            role: "vision" 或 "text"
+            model: 用户显式指定的模型名，为 None 时用配置默认值
+        """
+        if role == "vision":
+            provider = self.config.vision_provider
+            default_model = self.config.vision_model
+        else:
+            provider = self.config.text_provider
+            default_model = self.config.text_model
+
+        api_key = self.config.get_api_key(provider)
+        return provider, api_key, (model or default_model)
+
+    def _endpoint(self, provider: str) -> str:
+        """获取 API 端点，支持第三方中转站自定义地址。"""
+        if provider == "deepseek" and self.config.deepseek_base_url:
+            base = self.config.deepseek_base_url.rstrip("/")
+            # 允许用户只填到域名，自动补全路径
+            if not base.endswith("/chat/completions"):
+                base = f"{base}/chat/completions"
+            return base
+
+        url = ENDPOINTS.get(provider)
+        if not url:
+            raise LLMError(f"未知的服务商：{provider}")
+        return url
 
     # ------------------------------------------------------------------
     # 底层调用
@@ -56,15 +101,17 @@ class LLMClient:
         temperature: float = 0.3,
         max_retries: int = 3,
         json_mode: bool = False,
+        role: str = "text",
     ) -> str:
         """调用大模型，返回文本回复。
 
         Args:
             messages: OpenAI 格式的消息列表
-            model: 模型名称，默认使用配置中的 text_model
+            model: 模型名称，默认按 role 取配置
             temperature: 温度。分析类任务建议低温度（0.1-0.3）以保证稳定性
             max_retries: 最大重试次数
             json_mode: 是否要求模型输出 JSON（部分服务商支持 response_format）
+            role: "vision" 或 "text"，决定使用哪个服务商
 
         Returns:
             模型返回的文本
@@ -72,13 +119,8 @@ class LLMClient:
         Raises:
             LLMError: 所有重试均失败
         """
-        provider = self.config.llm_provider
-        api_key = self.config.get_api_key()
-        model = model or self.config.text_model
-        url = ENDPOINTS.get(provider)
-
-        if not url:
-            raise LLMError(f"未知的服务商：{provider}")
+        provider, api_key, model = self._resolve(role, model)
+        url = self._endpoint(provider)
 
         payload: dict[str, Any] = {
             "model": model,
@@ -86,8 +128,7 @@ class LLMClient:
             "temperature": temperature,
         }
 
-        # DeepSeek 不支持 response_format 的 json_object，其他两家支持
-        if json_mode and provider in ("dashscope", "zhipu"):
+        if json_mode and provider in JSON_MODE_SUPPORTED:
             payload["response_format"] = {"type": "json_object"}
 
         headers = {
@@ -122,7 +163,11 @@ class LLMClient:
                         print(f"  [重试 {attempt + 1}/{max_retries}] {exc}，{wait}s 后重试...")
                     time.sleep(wait)
 
-        raise LLMError(f"调用失败，已重试 {max_retries} 次。最后错误：{last_error}")
+        raise LLMError(
+            f"调用失败，已重试 {max_retries} 次。\n"
+            f"服务商：{provider}｜模型：{model}\n"
+            f"最后错误：{last_error}"
+        )
 
     # ------------------------------------------------------------------
     # 图片输入
@@ -168,10 +213,31 @@ class LLMClient:
 
         Returns:
             模型返回的文本
+
+        Raises:
+            LLMError: 配置的视觉服务商不支持图片输入（如 DeepSeek）
         """
+        provider, _, model = self._resolve("vision", model)
+
+        # 提前拦截：DeepSeek 没有视觉模型，配错了要给出明确提示，
+        # 而不是等 API 返回一个看不懂的错误
+        if provider == "deepseek":
+            raise LLMError(
+                "DeepSeek 目前没有视觉模型，无法识别图片。\n"
+                "请在 .env 中把 VISION_PROVIDER 设为 dashscope 或 zhipu，\n"
+                "并配置对应的 API Key（这两家都有免费额度）。\n"
+                "文本分析仍然可以用 DeepSeek，两者互不影响。"
+            )
+
+        if not any(model.startswith(p) for p in VISION_MODEL_PREFIXES):
+            if self.config.debug:
+                print(
+                    f"  [警告] 模型 {model} 看起来不是视觉模型，"
+                    f"调用可能失败。请确认 VISION_MODEL 配置正确。"
+                )
+
         b64 = self.encode_image(image_path)
         mime = self.guess_mime_type(image_path)
-        model = model or self.config.vision_model
 
         messages = [
             {
@@ -186,7 +252,7 @@ class LLMClient:
             }
         ]
 
-        return self.chat(messages, model=model, temperature=temperature)
+        return self.chat(messages, model=model, temperature=temperature, role="vision")
 
     # ------------------------------------------------------------------
     # JSON 输出解析

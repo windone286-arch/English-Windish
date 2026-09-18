@@ -204,16 +204,23 @@ def main() -> int:
 
     config = get_config()
 
-    # 提前校验 API Key，避免跑到一半才报错
-    try:
-        config.get_api_key()
-    except ValueError as exc:
-        print(f"\n配置错误：\n{exc}\n", file=sys.stderr)
+    # 提前校验配置，避免跑到一半才报错
+    problems = config.validate()
+    if problems:
+        print("\n配置有问题，请先修复：\n", file=sys.stderr)
+        for i, problem in enumerate(problems, 1):
+            print(f"{i}. {problem}\n", file=sys.stderr)
+        print(
+            "提示：把 .env.example 复制为 .env，填入你的 API Key。\n",
+            file=sys.stderr,
+        )
         return 1
 
     print("=" * 60)
     print("  English-Windish · 英语文本分析")
     print("=" * 60)
+    print(f"  视觉：{config.vision_provider} / {config.vision_model}")
+    print(f"  文本：{config.text_provider} / {config.text_model}")
 
     try:
         if args.text:
