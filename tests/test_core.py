@@ -1,0 +1,359 @@
+"""
+单元测试。
+
+这些测试**不调用真实 API**，只验证纯逻辑部分：
+- 数据模型
+- 文本切分
+- JSON 提取
+- 报告渲染
+
+为什么这样设计？因为调用 API 的测试又慢又要花钱，而且在 CI 里跑不了。
+把可测的纯逻辑抽出来单独测，是工程上的标准做法。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.grammar.analyzer import GrammarAnalyzer  # noqa: E402
+from src.llm_client import LLMClient, LLMError  # noqa: E402
+from src.models import (  # noqa: E402
+    AnalysisResult,
+    Collocation,
+    GrammarPoint,
+    GrammarType,
+    Sentence,
+    WordEntry,
+    WordForm,
+)
+from src.report.generator import ReportGenerator  # noqa: E402
+
+
+# ======================================================================
+# 数据模型
+# ======================================================================
+
+
+class TestModels:
+    def test_sentence_summary_counts_grammar_points(self):
+        """summary 应该正确统计语法点数量。"""
+        s1 = Sentence(index=1, original="Hello world.")
+        s1.grammar_points.append(
+            GrammarPoint(text="Hello", grammar_type=GrammarType.COLLOCATION)
+        )
+
+        s2 = Sentence(index=2, original="Goodbye world.")
+
+        result = AnalysisResult(sentences=[s1, s2])
+        assert result.summary() == "识别 2 句 | 语法点 1 处 | 生词 0 个"
+
+    def test_to_dict_serializable(self):
+        """to_dict 的结果必须能被 JSON 序列化（枚举要转成字符串）。"""
+        import json
+
+        s = Sentence(index=1, original="Test.")
+        s.grammar_points.append(
+            GrammarPoint(text="Test", grammar_type=GrammarType.SPECIAL_PATTERN)
+        )
+        result = AnalysisResult(sentences=[s])
+
+        payload = result.to_dict()
+        text = json.dumps(payload, ensure_ascii=False)
+        assert "特殊句式" in text
+
+    def test_grammar_type_is_str_enum(self):
+        """GrammarType 继承 str，可以直接和字符串比较。"""
+        assert GrammarType.COLLOCATION == "固定搭配"
+        assert GrammarType.COMPLEX_SENTENCE.value == "复杂句型"
+
+
+# ======================================================================
+# 文本切分
+# ======================================================================
+
+
+class TestTextSplitting:
+    def test_short_text_single_chunk(self):
+        text = "This is short. Very short."
+        assert len(GrammarAnalyzer._split_text(text)) == 1
+
+    def test_long_text_split(self):
+        text = "This is a sentence that repeats. " * 200
+        chunks = GrammarAnalyzer._split_text(text)
+        assert len(chunks) > 1
+        # 每块都不应超过上限太多（允许超出一个句子的长度）
+        for chunk in chunks:
+            assert len(chunk) < 3500
+
+    def test_paragraph_split_preserves_content(self):
+        """切分不应该丢失任何内容。"""
+        text = "First paragraph here.\n\nSecond paragraph here.\n\nThird one."
+        chunks = GrammarAnalyzer._split_text(text)
+        joined = " ".join(chunks)
+        assert "First paragraph" in joined
+        assert "Second paragraph" in joined
+        assert "Third one" in joined
+
+    def test_abbreviation_not_split(self):
+        """缩写中的句点不应该被当作句子边界。"""
+        text = "Mr. Smith went to the U.S. last year."
+        parts = GrammarAnalyzer._split_by_sentence(text, max_len=1000)
+        assert len(parts) == 1
+        assert "Mr. Smith" in parts[0]
+        assert "U.S." in parts[0]
+
+    def test_sentence_split_by_punctuation(self):
+        """按句末标点切分。
+
+        注意：_split_by_sentence 的语义是"把句子按 max_len 累加成块"，
+        不是"一个句子一块"。所以只有 max_len 小到装不下两句时才会分开。
+        """
+        text = "First sentence. Second sentence! Third sentence?"
+        parts = GrammarAnalyzer._split_by_sentence(text, max_len=20)
+        assert len(parts) == 3
+        assert parts[0] == "First sentence."
+        assert parts[1] == "Second sentence!"
+        assert parts[2] == "Third sentence?"
+
+    def test_sentence_split_respects_max_len(self):
+        """max_len 足够大时，多句应合并成一块。"""
+        text = "First sentence. Second sentence! Third sentence?"
+        parts = GrammarAnalyzer._split_by_sentence(text, max_len=1000)
+        assert len(parts) == 1
+
+
+# ======================================================================
+# JSON 提取（抗模型输出污染）
+# ======================================================================
+
+
+class TestJsonExtraction:
+    def test_plain_json(self):
+        text = '{"a": 1, "b": "hello"}'
+        assert LLMClient.extract_json(text) == {"a": 1, "b": "hello"}
+
+    def test_json_in_code_block(self):
+        text = '```json\n{"a": 1}\n```'
+        assert LLMClient.extract_json(text) == {"a": 1}
+
+    def test_json_with_preamble(self):
+        """模型经常在前面加废话。"""
+        text = '好的，以下是分析结果：\n{"a": 1}\n希望有帮助。'
+        assert LLMClient.extract_json(text) == {"a": 1}
+
+    def test_nested_json(self):
+        text = '{"outer": {"inner": {"deep": [1, 2, 3]}}}'
+        result = LLMClient.extract_json(text)
+        assert result["outer"]["inner"]["deep"] == [1, 2, 3]
+
+    def test_braces_inside_string(self):
+        """字符串里的花括号不应该干扰括号配对。"""
+        text = '{"text": "use {braces} carefully", "n": 1}'
+        result = LLMClient.extract_json(text)
+        assert result["text"] == "use {braces} carefully"
+        assert result["n"] == 1
+
+    def test_escaped_quotes_inside_string(self):
+        text = '{"text": "he said \\"hi\\""}'
+        result = LLMClient.extract_json(text)
+        assert result["text"] == 'he said "hi"'
+
+    def test_empty_raises(self):
+        with pytest.raises(LLMError):
+            LLMClient.extract_json("")
+
+    def test_no_json_raises(self):
+        with pytest.raises(LLMError):
+            LLMClient.extract_json("这里完全没有 JSON。")
+
+
+# ======================================================================
+# 语法点校验（幻觉过滤）
+# ======================================================================
+
+
+class TestGrammarValidation:
+    def setup_method(self):
+        # 不传 client 会去读配置，这里造一个最小可用对象
+        self.analyzer = GrammarAnalyzer.__new__(GrammarAnalyzer)
+
+        class FakeConfig:
+            debug = False
+
+        class FakeClient:
+            config = FakeConfig()
+
+        self.analyzer.client = FakeClient()
+
+    def test_hallucinated_span_dropped(self):
+        """模型标注的片段不在原句中时，应该被丢弃。"""
+        raw = [
+            {
+                "index": 1,
+                "original": "The book is interesting.",
+                "translation": "这本书很有趣。",
+                "grammar_points": [
+                    {
+                        "text": "which I bought",  # 原句里根本没有
+                        "grammar_type": "复杂句型",
+                        "explanation": "编造的",
+                    }
+                ],
+            }
+        ]
+        sentences = self.analyzer._parse_sentences(raw)
+        assert len(sentences) == 1
+        assert sentences[0].grammar_points == []
+
+    def test_valid_span_kept(self):
+        raw = [
+            {
+                "index": 1,
+                "original": "The book which I bought is interesting.",
+                "translation": "我买的那本书很有趣。",
+                "grammar_points": [
+                    {
+                        "text": "which I bought",
+                        "grammar_type": "复杂句型",
+                        "subtype": "定语从句",
+                        "explanation": "修饰 the book",
+                        "signal_words": ["which"],
+                    }
+                ],
+            }
+        ]
+        sentences = self.analyzer._parse_sentences(raw)
+        assert len(sentences[0].grammar_points) == 1
+        gp = sentences[0].grammar_points[0]
+        assert gp.text == "which I bought"
+        assert gp.grammar_type == GrammarType.COMPLEX_SENTENCE
+        assert gp.signal_words == ["which"]
+
+    def test_invalid_grammar_type_falls_back(self):
+        """未知的语法类型应该回退到默认值，而不是崩溃。"""
+        raw = [
+            {
+                "index": 1,
+                "original": "Test sentence.",
+                "grammar_points": [
+                    {"text": "Test", "grammar_type": "根本不存在的类型"}
+                ],
+            }
+        ]
+        sentences = self.analyzer._parse_sentences(raw)
+        assert sentences[0].grammar_points[0].grammar_type == GrammarType.COLLOCATION
+
+    def test_grammar_points_sorted_by_position(self):
+        """语法点应按在原句中的出现位置排序，方便界面按顺序高亮。"""
+        raw = [
+            {
+                "index": 1,
+                "original": "Not only did he pass, but he also won.",
+                "grammar_points": [
+                    {"text": "but he also won", "grammar_type": "固定搭配"},
+                    {"text": "Not only did he", "grammar_type": "特殊句式"},
+                ],
+            }
+        ]
+        sentences = self.analyzer._parse_sentences(raw)
+        points = sentences[0].grammar_points
+        assert points[0].text == "Not only did he"
+        assert points[1].text == "but he also won"
+
+    def test_empty_original_skipped(self):
+        raw = [{"index": 1, "original": "   ", "translation": "空"}]
+        assert self.analyzer._parse_sentences(raw) == []
+
+
+# ======================================================================
+# 报告渲染
+# ======================================================================
+
+
+class TestReportGenerator:
+    def _make_result(self) -> AnalysisResult:
+        s = Sentence(
+            index=1,
+            original="The book which I bought is interesting.",
+            translation="我买的那本书很有趣。",
+            structure="主 + 定从 + 系表",
+        )
+        s.grammar_points.append(
+            GrammarPoint(
+                text="which I bought",
+                grammar_type=GrammarType.COMPLEX_SENTENCE,
+                subtype="定语从句",
+                explanation="修饰 the book",
+                signal_words=["which"],
+            )
+        )
+
+        w = WordEntry(
+            word="interesting",
+            phonetic_uk="/ˈɪntrəstɪŋ/",
+            morphology="interest + -ing",
+            etymon="源自拉丁语 inter esse（在其中）",
+            high_freq_definitions=["adj. 有趣的"],
+            all_definitions=[
+                WordForm(part_of_speech="adj.", definitions=["有趣的", "引人入胜的"])
+            ],
+            collocations=[
+                Collocation(
+                    phrase="be interested in",
+                    meaning="对...感兴趣",
+                    example="I am interested in music.",
+                    example_translation="我对音乐感兴趣。",
+                )
+            ],
+        )
+
+        return AnalysisResult(
+            source_image="demo.jpg",
+            created_at="2026-09-19 03:00:00",
+            raw_text="The book which I bought is interesting.",
+            sentences=[s],
+            full_translation="我买的那本书很有趣。",
+            words=[w],
+        )
+
+    def test_markdown_contains_key_sections(self):
+        md = ReportGenerator().to_markdown(self._make_result())
+        assert "# 英语文本分析报告" in md
+        assert "## 一、原文" in md
+        assert "## 二、逐句语法解析" in md
+        assert "## 三、全文翻译" in md
+        assert "## 四、单词精讲" in md
+
+    def test_markdown_contains_grammar_marker(self):
+        md = ReportGenerator().to_markdown(self._make_result())
+        assert "`which I bought`" in md
+        assert "定语从句" in md
+
+    def test_markdown_contains_collocation_with_example(self):
+        md = ReportGenerator().to_markdown(self._make_result())
+        assert "be interested in" in md
+        assert "I am interested in music." in md
+        assert "我对音乐感兴趣。" in md
+
+    def test_markdown_foldable_definitions(self):
+        """完整释义应该放在折叠块里。"""
+        md = ReportGenerator().to_markdown(self._make_result())
+        assert "<details>" in md
+        assert "展开查看全部释义" in md
+
+    def test_json_round_trip(self):
+        import json
+
+        result = self._make_result()
+        payload = json.loads(ReportGenerator().to_json(result))
+        assert payload["sentences"][0]["original"] == result.sentences[0].original
+        assert payload["words"][0]["word"] == "interesting"
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
