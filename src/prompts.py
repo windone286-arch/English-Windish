@@ -73,26 +73,26 @@ GRAMMAR_ANALYSIS = """你是一位资深的英语语法教学专家，面向中�
 
 只输出 JSON，不要任何其他文字：
 
-{
+{{
   "sentences": [
-    {
+    {{
       "index": 1,
       "original": "英文原句",
       "translation": "中文翻译",
       "structure": "主干结构描述",
       "grammar_points": [
-        {
+        {{
           "text": "原句中的精确片段",
           "grammar_type": "固定搭配",
           "subtype": "",
           "explanation": "判断依据：... 语法现象：... 作用：...",
           "signal_words": ["标志词"]
-        }
+        }}
       ]
-    }
+    }}
   ],
   "full_translation": "全文连贯的中文翻译"
-}
+}}
 
 ## 待分析文本
 
@@ -128,9 +128,9 @@ KEYWORD_EXTRACTION = """你是一位英语教学专家，擅长判断哪些词�
 
 只输出 JSON，不要任何其他文字：
 
-{
+{{
   "words": ["word1", "word2", "word3"]
-}
+}}
 
 注意：只输出单词原形（如遇到 running 输出 run），小写，去重。
 

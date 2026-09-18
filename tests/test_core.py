@@ -35,6 +35,64 @@ from src.report.generator import ReportGenerator  # noqa: E402
 
 
 # ======================================================================
+# Prompt 模板
+# ======================================================================
+
+
+class TestPrompts:
+    """Prompt 模板测试。
+
+    这里有一个真实的踩坑：Prompt 里含 JSON 示例的花括号，
+    而 str.format() 会把 { } 当成占位符，导致 KeyError。
+    修法是转义成 {{ }}。这组测试就是防止以后加新 Prompt 时重犯。
+    """
+
+    def test_all_templates_format_without_error(self):
+        """所有 Prompt 模板都应该能用占位符正常格式化。
+
+        如果某个模板里有未转义的花括号（比如 JSON 示例），
+        这里会抛 KeyError，测试立刻失败。
+        """
+        from src import prompts as P
+
+        cases = [
+            (P.IMAGE_OCR, {}),
+            (P.GRAMMAR_ANALYSIS, {"text": "sample"}),
+            (P.KEYWORD_EXTRACTION, {"count": 5, "text": "sample"}),
+            (P.WORD_DETAIL, {"word": "test", "context_hint": ""}),
+            (
+                P.STUDY_SUGGESTION,
+                {
+                    "sentence_count": 1,
+                    "grammar_count": 1,
+                    "grammar_types": "固定搭配",
+                    "word_count": 1,
+                },
+            ),
+        ]
+
+        for template, kwargs in cases:
+            # 不抛异常即通过
+            template.format(**kwargs)
+
+    def test_grammar_prompt_json_example_preserved(self):
+        """转义后的 JSON 示例应该还原成正常的单个花括号。"""
+        from src.prompts import GRAMMAR_ANALYSIS
+
+        result = GRAMMAR_ANALYSIS.format(text="sample")
+        # 格式化后应该是正常的 JSON 结构，而不是 {{ }}
+        assert '"sentences": [' in result
+        assert "{{" not in result
+
+    def test_prompts_contain_required_placeholders(self):
+        from src import prompts as P
+
+        assert "{text}" in P.GRAMMAR_ANALYSIS
+        assert "{count}" in P.KEYWORD_EXTRACTION
+        assert "{word}" in P.WORD_DETAIL
+
+
+# ======================================================================
 # 配置
 # ======================================================================
 
