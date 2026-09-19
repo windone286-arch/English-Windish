@@ -1229,3 +1229,83 @@ details.more-defs > summary:hover { text-decoration: underline; }
   .result-source { order: 3; flex-basis: 100%; }
   .drawer { width: 100%; max-width: 100%; }
 }
+
+/* ==========================================================================
+   登录页
+
+   独立于主界面的一个极简页面。样式复用同一套 CSS 变量，
+   所以主题色、圆角、阴影和主界面保持一致，不会有割裂感。
+   ========================================================================== */
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 32px 28px;
+}
+
+.login-brand { margin-bottom: 24px; }
+
+.login-title {
+  margin: 0 0 8px;
+  font-size: 19px;
+  font-weight: 640;
+  color: var(--text);
+}
+
+.login-desc {
+  margin: 0 0 22px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+
+.login-form { margin: 0; }
+
+.login-form .field { margin-bottom: 16px; }
+
+.login-form input[type="password"] {
+  width: 100%;
+  font: inherit;
+  font-size: 14.5px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  transition: border-color .15s, box-shadow .15s;
+}
+
+.login-form input[type="password"]:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.login-submit {
+  width: 100%;
+  justify-content: center;
+  padding: 11px 16px;
+  font-size: 14.5px;
+}
+
+.login-error {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid rgba(220, 38, 38, .18);
+  border-radius: var(--radius-sm);
+}

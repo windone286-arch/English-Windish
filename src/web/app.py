@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import uuid
 from collections.abc import Callable
@@ -39,14 +40,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from src.config import get_config
 from src.llm_client import LLMError
 from src.pipeline import IMAGE_STAGES, TEXT_STAGES, analyze_image, analyze_text
 from src.storage import KIND_IMAGE, KIND_TEXT, get_history_store
+from src.web import auth
 
 # 项目根目录
 WEB_DIR = Path(__file__).resolve().parent
@@ -64,6 +72,105 @@ app = FastAPI(
     description="拍照 / 输入文本 → 语法解析 → 单词精讲",
     version="0.2.0",
 )
+
+
+# ======================================================================
+# 访问保护
+#
+# 部署到公网后，链接可能被转发出去。而这个应用的每一次分析都在消耗
+# 真实付费的 API 额度，所以设两道锁：
+#
+#   第一道：访问密码（环境变量 ACCESS_PASSWORD）
+#   第二道：每日调用上限（环境变量 DAILY_LIMIT）
+#
+# 为什么还要第二道？因为密码是可以被转发的，转发出去就收不回来了。
+# 每日上限保证「最坏情况下的损失」始终可估算：不管多少人拿到密码，
+# 一天最多只消耗这么多额度。
+#
+# 两个环境变量都不设置时，两道锁都不生效——本地开发完全不受影响。
+# ======================================================================
+
+# 无需登录即可访问的路径。
+#
+# /static/ 必须放行：否则登录页自己的样式表都加载不了，用户看到的是裸 HTML。
+# 放行这些没有安全风险——API Key 只在服务端使用，前端代码里不含任何秘密。
+EXEMPT_PATHS = {"/login", "/logout", "/favicon.ico"}
+EXEMPT_PREFIXES = ("/static/",)
+
+
+def _daily_limit() -> int:
+    """读取每日分析次数上限。0 或非法值表示不限制。"""
+    try:
+        return max(0, int(os.getenv("DAILY_LIMIT", "0")))
+    except ValueError:
+        return 0
+
+
+@app.middleware("http")
+async def access_control(request: Request, call_next):
+    """访问密码校验。
+
+    未配置 ACCESS_PASSWORD 时完全放行。
+    """
+    if not auth.is_enabled():
+        return await call_next(request)
+
+    path = request.url.path
+    if path in EXEMPT_PATHS or path.startswith(EXEMPT_PREFIXES):
+        return await call_next(request)
+
+    if auth.verify_token(request.cookies.get(auth.COOKIE_NAME)):
+        return await call_next(request)
+
+    # API 请求返回 401 让前端处理；页面请求直接跳登录页
+    if path.startswith("/api/"):
+        return JSONResponse(
+            status_code=401,
+            content={"type": "error", "message": "登录已过期，请重新输入访问密码。"},
+        )
+
+    return RedirectResponse("/login", status_code=303)
+
+
+@app.get("/login", include_in_schema=False)
+async def login_page() -> HTMLResponse:
+    """登录页。
+
+    始终返回同一个静态文件，错误提示通过 `?e=1` 传递——
+    这样服务端不需要拼 HTML，登录页也能被浏览器正常缓存。
+    """
+    login_file = STATIC_DIR / "login.html"
+    if not login_file.exists():
+        raise HTTPException(status_code=500, detail="登录页缺失")
+    return HTMLResponse(login_file.read_text(encoding="utf-8"))
+
+
+@app.post("/login", include_in_schema=False)
+async def login_submit(request: Request, password: str = Form("")):
+    """校验密码并下发登录凭证。"""
+    if not auth.check_password(password):
+        return RedirectResponse("/login?e=1", status_code=303)
+
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        auth.issue_token(),
+        max_age=auth.DEFAULT_TTL_SECONDS,
+        httponly=True,   # 禁止 JS 读取，防 XSS 窃取凭证
+        samesite="lax",  # 跨站请求不携带，防 CSRF
+        secure=auth.is_https(
+            request.headers.get("x-forwarded-proto"), request.url.scheme
+        ),
+    )
+    return response
+
+
+@app.get("/logout", include_in_schema=False)
+async def logout() -> RedirectResponse:
+    """退出登录。"""
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(auth.COOKIE_NAME)
+    return response
 
 
 # ======================================================================
@@ -99,6 +206,8 @@ async def health() -> dict:
         "text_model": config.text_model,
         "image_stages": IMAGE_STAGES,
         "text_stages": TEXT_STAGES,
+        "access_protection": auth.is_enabled(),
+        "daily_limit": _daily_limit(),
         "problems": [p.replace("\n", " ") for p in problems],
     }
 
@@ -220,6 +329,31 @@ def _ensure_configured() -> None:
         )
 
 
+def _check_daily_limit() -> None:
+    """检查并累加当日用量，超限则直接拒绝。
+
+    必须在真正开始分析**之前**调用——分析一旦启动就会调用付费 API，
+    事后再拦已经来不及了。
+    """
+    limit = _daily_limit()
+    if limit <= 0:
+        return
+
+    store = get_history_store()
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if store.get_usage(today) >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"今日分析次数已用完（上限 {limit} 次/天）。"
+                "这是为了防止 API 额度被过度消耗，明天会自动重置。"
+            ),
+        )
+
+    store.bump_usage(today)
+
+
 def _save_history(
     kind: str, source: str, result_dict: dict[str, Any]
 ) -> int | None:
@@ -262,6 +396,10 @@ async def analyze(
         )
     if not content:
         raise HTTPException(status_code=400, detail="上传的文件是空的")
+
+    # 所有校验都通过了，确认这次真的要开始分析，才计入当日用量。
+    # 顺序很关键：放在校验之后，用户传错格式就不会白白消耗一次配额。
+    _check_daily_limit()
 
     # 用 uuid 重命名，避免：
     # 1. 用户的原始文件名含路径分隔符导致目录穿越
@@ -324,6 +462,9 @@ async def analyze_text_endpoint(
         )
 
     word_count = max(3, min(15, word_count))
+
+    # 校验通过，计入当日用量
+    _check_daily_limit()
 
     # 历史记录里的来源标识：短文本直接用原文，长文本截断
     source = cleaned if len(cleaned) <= 100 else cleaned[:100] + "…"
@@ -446,8 +587,6 @@ def main() -> int:
     - **云端部署**：平台会注入 PORT 环境变量，此时监听 0.0.0.0:$PORT。
       容器环境下必须绑定 0.0.0.0，否则容器外无法访问。
     """
-    import os
-
     import uvicorn
 
     port_env = os.getenv("PORT")
@@ -472,6 +611,12 @@ def main() -> int:
             for p in problems:
                 print(f"    - {p.replace(chr(10), ' ')}")
         print(f"\n  访问：http://{host}:{port}")
+        print(
+            "  访问保护："
+            + ("已启用（需要密码）" if auth.is_enabled() else "未启用（本地开发）")
+        )
+        limit = _daily_limit()
+        print(f"  每日上限：{limit if limit else '不限制'}")
         print("=" * 60)
 
     uvicorn.run(

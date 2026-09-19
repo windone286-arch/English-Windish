@@ -137,6 +137,7 @@
   async function checkHealth() {
     try {
       const resp = await fetch('/api/health');
+      if (redirectIfUnauthorized(resp)) return;
       const data = await resp.json();
 
       if (data.problems && data.problems.length) {
@@ -365,10 +366,27 @@
     return Math.min(15, Math.max(3, parseInt(value, 10) || 8));
   }
 
+  /**
+   * 登录过期时跳回登录页。
+   *
+   * 返回是否已经处理过。调用方拿到 true 就直接 return——
+   * 因为页面马上就要跳走了，再往下走只会白白报一个「请求失败」的错，
+   * 用户看到一闪而过的红字会觉得程序坏了。
+   */
+  function redirectIfUnauthorized(resp) {
+    if (resp.status === 401) {
+      location.href = '/login';
+      return true;
+    }
+    return false;
+  }
+
   /** 发起请求并读取 SSE 流。 */
   async function runStream(endpoint, formData) {
     try {
       const resp = await fetch(endpoint, { method: 'POST', body: formData });
+
+      if (redirectIfUnauthorized(resp)) return;
 
       // 非流式错误（如 400 / 503），响应是 JSON
       if (!resp.ok) {
@@ -985,6 +1003,7 @@
 
     try {
       const resp = await fetch('/api/history?limit=100');
+      if (redirectIfUnauthorized(resp)) return;
       const data = await resp.json();
 
       el.historyTotal.textContent = data.total ? `（${data.total}）` : '';
@@ -1042,6 +1061,7 @@
   async function loadHistoryDetail(id) {
     try {
       const resp = await fetch(`/api/history/${id}`);
+      if (redirectIfUnauthorized(resp)) return;
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.message || `加载失败（HTTP ${resp.status}）`);
@@ -1063,6 +1083,7 @@
   async function deleteHistoryItem(id, node) {
     try {
       const resp = await fetch(`/api/history/${id}`, { method: 'DELETE' });
+      if (redirectIfUnauthorized(resp)) return;
       if (!resp.ok) throw new Error('删除失败');
 
       node.remove();
@@ -1081,7 +1102,8 @@
     if (!confirm('确定清空全部历史记录？此操作不可恢复。')) return;
 
     try {
-      await fetch('/api/history', { method: 'DELETE' });
+      const resp = await fetch('/api/history', { method: 'DELETE' });
+      if (redirectIfUnauthorized(resp)) return;
       renderHistoryList([]);
       el.historyTotal.textContent = '';
       refreshHistoryBadge();
@@ -1093,6 +1115,7 @@
   async function refreshHistoryBadge() {
     try {
       const resp = await fetch('/api/history?limit=1');
+      if (redirectIfUnauthorized(resp)) return;
       const data = await resp.json();
 
       const total = data.total || 0;

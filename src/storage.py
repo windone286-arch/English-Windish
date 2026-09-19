@@ -100,6 +100,19 @@ class HistoryStore:
                 "CREATE INDEX IF NOT EXISTS idx_analyses_created "
                 "ON analyses(created_at DESC)"
             )
+            # 每日用量计数表。
+            #
+            # 这张表存的不是业务数据，而是**成本账本**：每天一行，
+            # 记录当天已经消耗了多少次分析额度。有了它才能在超限时
+            # 及时拦住请求，而不是等月底看到账单才发现。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage (
+                    day   TEXT    PRIMARY KEY,
+                    count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -214,6 +227,38 @@ class HistoryStore:
             conn.execute("DELETE FROM analyses")
             conn.commit()
         return int(total)
+
+    # ------------------------------------------------------------------
+    # 用量计数（成本控制，与历史记录无关）
+    # ------------------------------------------------------------------
+
+    def get_usage(self, day: str) -> int:
+        """读取某一天已使用的分析次数。day 格式为 YYYY-MM-DD。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT count FROM usage WHERE day = ?", (day,)
+            ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def bump_usage(self, day: str) -> int:
+        """把某一天的计数加一，返回加完后的值。
+
+        用一条 UPSERT 完成「没有就插入 1，已存在就加 1」，
+        而不是先查后写两次往返——少一次往返，也少一个并发窗口。
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage(day, count) VALUES (?, 1)
+                ON CONFLICT(day) DO UPDATE SET count = count + 1
+                """,
+                (day,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT count FROM usage WHERE day = ?", (day,)
+            ).fetchone()
+        return int(row["count"]) if row else 0
 
 
 def _make_summary(result: dict[str, Any]) -> str:

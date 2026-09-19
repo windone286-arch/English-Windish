@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>需要访问密码 · English-Windish</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-page">
+
+<main class="login-card">
+  <div class="brand login-brand">
+    <span class="brand-mark">EW</span>
+    <div class="brand-text">
+      <h1>English-Windish</h1>
+      <p>拍照或输入文本 · 语法解析 + 单词精讲</p>
+    </div>
+  </div>
+
+  <h2 class="login-title">请输入访问密码</h2>
+  <p class="login-desc">
+    这是一个个人作品演示站点。每次分析都会消耗真实的 API 额度，
+    所以设了一道门，请向站点所有者索取密码。
+  </p>
+
+  <form class="login-form" method="post" action="/login">
+    <label class="field">
+      <span>访问密码</span>
+      <input type="password" name="password" id="password-input"
+             placeholder="请输入密码" autocomplete="current-password"
+             autofocus required>
+    </label>
+
+    <button class="btn btn-primary login-submit" type="submit">进入</button>
+  </form>
+
+  <p class="login-error" id="login-error" hidden>
+    密码不正确，请重新输入。
+  </p>
+</main>
+
+<script>
+  // 密码错误时后端会重定向回 /login?e=1，这里据此显示提示。
+  // 用 query 参数而不是直接渲染错误页，是为了让登录页始终是同一个静态文件，
+  // 不需要在服务端拼 HTML。
+  if (new URLSearchParams(location.search).has('e')) {
+    var box = document.getElementById('login-error');
+    var input = document.getElementById('password-input');
+    if (box) box.hidden = false;
+    if (input) { input.value = ''; input.focus(); }
+  }
+</script>
+
+</body>
+</html>
