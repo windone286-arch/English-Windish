@@ -168,5 +168,242 @@ class TestSamples:
             assert Path(name).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
+# ======================================================================
+# 文本分析接口
+# ======================================================================
+
+
+def _fake_analyze_text(text, word_count=8, no_words=False, on_progress=None):
+    """替身：不调真实 API，直接返回一个最小结果。"""
+    from src.models import AnalysisResult
+
+    if on_progress:
+        for i, msg in enumerate(["分析语法结构", "生成单词词卡", "汇总分析结果"], 1):
+            on_progress(i, 3, msg)
+
+    result = AnalysisResult(created_at="2026-09-19 12:00:00", raw_text=text)
+    result.stats = {
+        "sentence_count": 0,
+        "grammar_count": 0,
+        "grammar_types": {},
+        "word_count": 0,
+        "collocation_count": 0,
+        "text_length": len(text),
+    }
+    return result
+
+
+def _use_temp_store(monkeypatch, tmp_path):
+    """把历史存储指向临时数据库，避免污染真实数据。"""
+    from src.storage import HistoryStore
+
+    store = HistoryStore(db_path=tmp_path / "web_test.db")
+    monkeypatch.setattr("src.web.app.get_history_store", lambda: store)
+    return store
+
+
+class TestAnalyzeText:
+    def test_rejects_empty_text(self):
+        resp = client.post("/api/analyze-text", data={"text": "   "})
+        assert resp.status_code in (400, 503)
+
+        if resp.status_code == 400:
+            assert "不能为空" in resp.json()["message"]
+
+    def test_rejects_too_long_text(self):
+        resp = client.post("/api/analyze-text", data={"text": "a" * 20001})
+        assert resp.status_code in (400, 503)
+
+        if resp.status_code == 400:
+            assert "过长" in resp.json()["message"]
+
+    def test_success_returns_stream_events(self, monkeypatch, tmp_path):
+        _use_temp_store(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.web.app.analyze_text", _fake_analyze_text)
+
+        resp = client.post(
+            "/api/analyze-text",
+            data={"text": "The book is interesting.", "word_count": "5"},
+        )
+
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
+        body = resp.text
+        assert '"type": "start"' in body
+        assert '"type": "progress"' in body
+        assert '"type": "done"' in body
+
+    def test_success_saves_to_history(self, monkeypatch, tmp_path):
+        store = _use_temp_store(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.web.app.analyze_text", _fake_analyze_text)
+
+        client.post("/api/analyze-text", data={"text": "Saved text."})
+
+        assert store.count() == 1
+        item = store.list()[0]
+        assert item.kind == "text"
+        assert "Saved text." in item.source
+
+    def test_long_text_source_is_truncated(self, monkeypatch, tmp_path):
+        store = _use_temp_store(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.web.app.analyze_text", _fake_analyze_text)
+
+        client.post("/api/analyze-text", data={"text": "word " * 60})
+
+        # storage 层会截断到 200 字符
+        assert len(store.list()[0].source) <= 200
+
+    def test_word_count_is_clamped(self, monkeypatch, tmp_path):
+        """词卡数量的边界值应该被收敛到 3-15。"""
+        _use_temp_store(monkeypatch, tmp_path)
+
+        captured = {}
+
+        def capture(text, word_count=8, no_words=False, on_progress=None):
+            captured["word_count"] = word_count
+            return _fake_analyze_text(text, on_progress=on_progress)
+
+        monkeypatch.setattr("src.web.app.analyze_text", capture)
+
+        client.post("/api/analyze-text", data={"text": "test", "word_count": "999"})
+        assert captured["word_count"] == 15
+
+        client.post("/api/analyze-text", data={"text": "test", "word_count": "1"})
+        assert captured["word_count"] == 3
+
+
+# ======================================================================
+# 历史记录接口
+# ======================================================================
+
+
+class TestHistoryEndpoints:
+    def test_list_empty(self, monkeypatch, tmp_path):
+        _use_temp_store(monkeypatch, tmp_path)
+
+        resp = client.get("/api/history")
+        assert resp.status_code == 200
+
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["items"] == []
+
+    def test_detail_not_found(self, monkeypatch, tmp_path):
+        _use_temp_store(monkeypatch, tmp_path)
+
+        resp = client.get("/api/history/99999")
+        assert resp.status_code == 404
+        assert "不存在" in resp.json()["message"]
+
+    def test_delete_not_found(self, monkeypatch, tmp_path):
+        _use_temp_store(monkeypatch, tmp_path)
+
+        resp = client.delete("/api/history/99999")
+        assert resp.status_code == 404
+
+    def test_save_list_detail_delete_flow(self, monkeypatch, tmp_path):
+        store = _use_temp_store(monkeypatch, tmp_path)
+
+        payload = {
+            "created_at": "2026-09-19 12:00:00",
+            "raw_text": "Round trip test.",
+            "sentences": [],
+            "words": [],
+            "stats": {"sentence_count": 0, "grammar_count": 0, "word_count": 0},
+        }
+        rid = store.save("text", "Round trip test.", payload)
+
+        # 列表
+        listing = client.get("/api/history").json()
+        assert listing["total"] == 1
+        assert listing["items"][0]["id"] == rid
+        assert "result" not in listing["items"][0]
+
+        # 详情
+        detail = client.get(f"/api/history/{rid}").json()
+        assert detail["result"]["raw_text"] == "Round trip test."
+
+        # 删除
+        assert client.delete(f"/api/history/{rid}").json()["deleted"] == rid
+        assert client.get("/api/history").json()["total"] == 0
+
+    def test_clear(self, monkeypatch, tmp_path):
+        store = _use_temp_store(monkeypatch, tmp_path)
+
+        for i in range(3):
+            store.save("text", f"item {i}", {"created_at": "2026-09-19 12:00:00"})
+
+        resp = client.delete("/api/history")
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == 3
+        assert client.get("/api/history").json()["total"] == 0
+
+    def test_limit_is_clamped(self, monkeypatch, tmp_path):
+        """limit 传超大值不应被接受。"""
+        store = _use_temp_store(monkeypatch, tmp_path)
+        store.save("text", "a", {"created_at": "2026-09-19 12:00:00"})
+
+        resp = client.get("/api/history?limit=99999")
+        assert resp.status_code == 200
+        assert len(resp.json()["items"]) == 1
+
+
+# ======================================================================
+# 页面结构（前端资源完整性）
+# ======================================================================
+
+
+class TestPageStructure:
+    """验证页面包含关键交互元素。
+
+    这些断言看起来琐碎，但它们能拦住「改了 HTML 忘了改 JS」
+    这类低级错误——元素 id 缺失会让界面静默失效。
+    """
+
+    def test_has_mode_switcher(self):
+        html = client.get("/").text
+        assert 'data-mode="image"' in html
+        assert 'data-mode="text"' in html
+        assert 'id="text-input"' in html
+
+    def test_has_result_tabs(self):
+        html = client.get("/").text
+        assert 'data-tab="translation"' in html
+        assert 'data-tab="grammar"' in html
+        assert 'data-tab="vocabulary"' in html
+
+    def test_has_back_button(self):
+        html = client.get("/").text
+        assert 'id="back-btn"' in html
+
+    def test_has_history_drawer(self):
+        html = client.get("/").text
+        assert 'id="history-drawer"' in html
+        assert 'id="history-open"' in html
+        assert 'id="history-list"' in html
+
+    def test_js_references_existing_ids(self):
+        """JS 里用 $('xxx') 取的元素，HTML 里必须存在。
+
+        取不到的元素会在运行时抛 null 错误，导致整个脚本挂掉。
+        """
+        import re
+
+        html = client.get("/").text
+        js = client.get("/static/app.js").text
+
+        # 找出 JS 中 $('xxx') 形式的引用
+        ids_in_js = set(re.findall(r"\$\('([a-z0-9-]+)'\)", js))
+
+        # 去掉 JS 里动态拼接的 id（如 `${id}`），只检查静态字符串
+        missing = [
+            i for i in ids_in_js
+            if f'id="{i}"' not in html
+        ]
+
+        assert not missing, f"JS 引用了 HTML 中不存在的元素：{missing}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

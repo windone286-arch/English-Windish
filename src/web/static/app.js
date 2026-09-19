@@ -1,7 +1,7 @@
 /* ==========================================================================
    English-Windish · 前端逻辑
 
-   两个值得说明的技术点：
+   三个值得说明的技术点：
 
    1. **用 fetch 读流，而不是 EventSource**
       EventSource 只支持 GET 请求，但我们上传文件必须用 POST。
@@ -13,6 +13,11 @@
       分析结果里包含用户图片中识别出的文字，属于不可信输入。
       如果拼 innerHTML，图片里的恶意内容就会被当作 HTML 执行。
       用 createElement + textContent 从根上杜绝 XSS。
+
+   3. **结果分页签而不是堆在一页**
+      全文翻译、语法解析、单词精讲各自独立成一页。
+      堆在一页时，一篇长文章的语法解析 + 词卡会有上万像素，
+      用户必须不停滚动；分页后每页内容聚焦，切换成本也低。
    ========================================================================== */
 
 (() => {
@@ -25,10 +30,15 @@
     statusDot: document.querySelector('#status .dot'),
     statusText: $('status-text'),
 
-    uploadPanel: $('upload-panel'),
+    // 输入区
+    inputPanel: $('input-panel'),
+    modeTabs: document.querySelectorAll('.mode-tab'),
+    modeImage: $('mode-image'),
+    modeText: $('mode-text'),
+
+    // 图片模式
     dropzone: $('dropzone'),
     fileInput: $('file-input'),
-
     preview: $('preview'),
     previewImg: $('preview-img'),
     previewName: $('preview-name'),
@@ -37,29 +47,59 @@
     analyzeBtn: $('analyze-btn'),
     resetBtn: $('reset-btn'),
 
+    // 文本模式
+    textInput: $('text-input'),
+    textCounter: $('text-counter'),
+    textWordCount: $('text-word-count'),
+    textAnalyzeBtn: $('text-analyze-btn'),
+    textClearBtn: $('text-clear-btn'),
+
+    // 进度 / 错误
     progressPanel: $('progress-panel'),
     progressLabel: $('progress-label'),
     progressBar: $('progress-bar'),
     progressSteps: $('progress-steps'),
-
     errorPanel: $('error-panel'),
     errorMessage: $('error-message'),
     errorBack: $('error-back'),
 
+    // 结果
     resultSection: $('result-section'),
+    resultSource: $('result-source'),
+    backBtn: $('back-btn'),
+    reanalyzeBtn: $('reanalyze-btn'),
     summaryBar: $('summary-bar'),
-    sentenceCount: $('sentence-count'),
-    sentences: $('sentences'),
-    translationPanel: $('translation-panel'),
+    resultTabs: document.querySelectorAll('.result-tab'),
+    tabCountGrammar: $('tab-count-grammar'),
+    tabCountVocabulary: $('tab-count-vocabulary'),
     fullTranslation: $('full-translation'),
-    wordCountLabel: $('word-count-label'),
+    translationEmpty: $('translation-empty'),
+    sentences: $('sentences'),
     words: $('words'),
     rawText: $('raw-text'),
+
+    // 历史记录
+    historyOpen: $('history-open'),
+    historyBadge: $('history-badge'),
+    historyDrawer: $('history-drawer'),
+    historyClose: $('history-close'),
+    historyList: $('history-list'),
+    historyTotal: $('history-total'),
+    historyClear: $('history-clear'),
+    drawerOverlay: $('drawer-overlay'),
 
     footerConfig: $('footer-config'),
   };
 
-  let currentFile = null;
+  const MAX_TEXT_CHARS = 20000;
+
+  // 当前状态
+  const state = {
+    mode: 'image',      // image | text
+    file: null,         // 待分析的图片文件
+    lastInput: null,    // 上次分析的输入，用于「重新分析」
+    loading: false,
+  };
 
   // ================================================================ 工具函数
 
@@ -71,14 +111,23 @@
     return node;
   }
 
+  function show(node, visible) {
+    if (node) node.hidden = !visible;
+  }
+
   function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
     return (bytes / 1024 / 1024).toFixed(1) + ' MB';
   }
 
-  function show(node, visible) {
-    node.hidden = !visible;
+  /** HTML 转义 + 换行处理，用于安全地展示用户文本。 */
+  function setText(node, text) {
+    node.textContent = text || '';
+  }
+
+  function escapeForAlert(text) {
+    return String(text).replace(/</g, '＜').replace(/>/g, '＞');
   }
 
   // ================================================================ 健康检查
@@ -112,10 +161,27 @@
     show(el.errorPanel, true);
     el.errorMessage.textContent = '服务器配置不完整：\n\n' +
       problems.map((p, i) => `${i + 1}. ${p}`).join('\n\n');
-    show(el.uploadPanel, false);
+    show(el.inputPanel, false);
   }
 
-  // ================================================================ 文件选择
+  // ================================================================ 模式切换
+
+  function switchMode(mode) {
+    state.mode = mode;
+
+    el.modeTabs.forEach((tab) => {
+      tab.classList.toggle('active', tab.dataset.mode === mode);
+    });
+
+    show(el.modeImage, mode === 'image');
+    show(el.modeText, mode === 'text');
+  }
+
+  el.modeTabs.forEach((tab) => {
+    tab.addEventListener('click', () => switchMode(tab.dataset.mode));
+  });
+
+  // ================================================================ 图片选择
 
   function selectFile(file) {
     if (!file) return;
@@ -129,7 +195,7 @@
       return;
     }
 
-    currentFile = file;
+    state.file = file;
 
     el.previewImg.src = URL.createObjectURL(file);
     el.previewName.textContent = file.name;
@@ -140,26 +206,6 @@
     show(el.preview, true);
   }
 
-  function resetAll() {
-    currentFile = null;
-    el.fileInput.value = '';
-    el.previewImg.src = '';
-
-    show(el.preview, false);
-    show(el.dropzone, true);
-    show(el.progressPanel, false);
-    show(el.errorPanel, false);
-    show(el.resultSection, false);
-
-    el.sentences.replaceChildren();
-    el.words.replaceChildren();
-    el.summaryBar.replaceChildren();
-    el.progressSteps.replaceChildren();
-    el.progressBar.style.width = '0%';
-  }
-
-  // ================================================================ 事件绑定
-
   el.dropzone.addEventListener('click', () => el.fileInput.click());
   el.dropzone.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -167,7 +213,6 @@
       el.fileInput.click();
     }
   });
-
   el.fileInput.addEventListener('change', (e) => selectFile(e.target.files[0]));
 
   ['dragenter', 'dragover'].forEach((type) => {
@@ -189,22 +234,30 @@
     if (file) selectFile(file);
   });
 
-  el.resetBtn.addEventListener('click', resetAll);
-  el.errorBack.addEventListener('click', resetAll);
-  el.analyzeBtn.addEventListener('click', startAnalysis);
+  // ================================================================ 文本输入
+
+  function updateTextCounter() {
+    const len = el.textInput.value.length;
+    el.textCounter.textContent = `${len} 字符`;
+    el.textCounter.classList.toggle('over', len > MAX_TEXT_CHARS);
+  }
+
+  el.textInput.addEventListener('input', updateTextCounter);
+
+  el.textClearBtn.addEventListener('click', () => {
+    el.textInput.value = '';
+    updateTextCounter();
+    el.textInput.focus();
+  });
 
   // ================================================================ 进度渲染
 
-  let stageNames = [];
-
   function initProgress(stages) {
-    stageNames = stages || [];
     el.progressSteps.replaceChildren();
 
-    stageNames.forEach((name, i) => {
+    (stages || []).forEach((name, i) => {
       const li = make('li');
-      const mark = make('span', 'step-mark', String(i + 1));
-      li.appendChild(mark);
+      li.appendChild(make('span', 'step-mark', String(i + 1)));
       li.appendChild(make('span', null, name));
       el.progressSteps.appendChild(li);
     });
@@ -214,9 +267,8 @@
 
   function updateProgress(step, total, message) {
     el.progressLabel.textContent = message;
-
-    const pct = total > 0 ? Math.round((step / total) * 100) : 0;
-    el.progressBar.style.width = pct + '%';
+    el.progressBar.style.width =
+      (total > 0 ? Math.round((step / total) * 100) : 0) + '%';
 
     const items = el.progressSteps.children;
     for (let i = 0; i < items.length; i++) {
@@ -237,32 +289,84 @@
 
   // ================================================================ 分析主流程
 
-  async function startAnalysis() {
-    if (!currentFile) return;
-
-    const wordCount = Math.min(
-      15,
-      Math.max(3, parseInt(el.wordCount.value, 10) || 8)
-    );
-
-    show(el.uploadPanel, false);
+  function beginAnalysis() {
+    state.loading = true;
+    show(el.inputPanel, false);
     show(el.errorPanel, false);
     show(el.resultSection, false);
     show(el.progressPanel, true);
 
-    el.progressLabel.textContent = '正在上传图片…';
+    el.progressLabel.textContent = '正在准备…';
     el.progressBar.style.width = '0%';
     el.progressSteps.replaceChildren();
+  }
 
+  function endAnalysis() {
+    state.loading = false;
+  }
+
+  /** 提交图片分析。 */
+  async function analyzeImageFile(file, wordCount) {
     const formData = new FormData();
-    formData.append('file', currentFile);
+    formData.append('file', file);
     formData.append('word_count', String(wordCount));
 
+    state.lastInput = { type: 'image', file, wordCount };
+
+    beginAnalysis();
+    await runStream('/api/analyze', formData);
+  }
+
+  /** 提交文本分析。 */
+  async function analyzeTextContent(text, wordCount) {
+    const formData = new FormData();
+    formData.append('text', text);
+    formData.append('word_count', String(wordCount));
+
+    state.lastInput = { type: 'text', text, wordCount };
+
+    beginAnalysis();
+    await runStream('/api/analyze-text', formData);
+  }
+
+  el.analyzeBtn.addEventListener('click', () => {
+    if (!state.file || state.loading) return;
+    const n = clampWordCount(el.wordCount.value);
+    analyzeImageFile(state.file, n);
+  });
+
+  el.textAnalyzeBtn.addEventListener('click', () => {
+    const text = el.textInput.value.trim();
+    if (!text) {
+      alert('请输入要分析的英文内容');
+      el.textInput.focus();
+      return;
+    }
+    if (text.length > MAX_TEXT_CHARS) {
+      alert(`文本过长（${text.length} 字符），上限 ${MAX_TEXT_CHARS} 字符`);
+      return;
+    }
+    if (state.loading) return;
+
+    analyzeTextContent(text, clampWordCount(el.textWordCount.value));
+  });
+
+  el.textInput.addEventListener('keydown', (e) => {
+    // Ctrl / Cmd + Enter 快捷提交
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      el.textAnalyzeBtn.click();
+    }
+  });
+
+  function clampWordCount(value) {
+    return Math.min(15, Math.max(3, parseInt(value, 10) || 8));
+  }
+
+  /** 发起请求并读取 SSE 流。 */
+  async function runStream(endpoint, formData) {
     try {
-      const resp = await fetch('/api/analyze', {
-        method: 'POST',
-        body: formData,
-      });
+      const resp = await fetch(endpoint, { method: 'POST', body: formData });
 
       // 非流式错误（如 400 / 503），响应是 JSON
       if (!resp.ok) {
@@ -275,11 +379,12 @@
       }
 
       if (!resp.body) {
-        throw new Error('当前浏览器不支持流式响应，请使用较新版本的 Chrome / Edge / Firefox');
+        throw new Error('当前浏览器不支持流式响应，请使用较新的 Chrome / Edge / Firefox');
       }
 
       await readEventStream(resp.body);
     } catch (err) {
+      endAnalysis();
       showError(err.message || String(err));
     }
   }
@@ -332,12 +437,18 @@
         break;
 
       case 'done':
+        endAnalysis();
         el.progressBar.style.width = '100%';
         el.progressLabel.textContent = '分析完成';
-        renderResult(event.result);
+        renderResult(event.result, {
+          source: event.filename,
+          canReanalyze: true,
+        });
+        refreshHistoryBadge();
         break;
 
       case 'error':
+        endAnalysis();
         showError(event.message);
         break;
     }
@@ -349,25 +460,34 @@
     show(el.errorPanel, true);
     el.errorMessage.textContent = message;
 
-    // 出错后允许重新选择图片
-    show(el.uploadPanel, false);
-    show(el.preview, true);
+    // 出错后让用户能回到输入界面重试
+    show(el.inputPanel, false);
+    switchMode(state.mode);
+    show(el.preview, state.mode === 'image' && !!state.file);
+    show(el.dropzone, state.mode === 'image' && !state.file);
   }
 
   // ================================================================ 结果渲染
 
-  function renderResult(result) {
+  function renderResult(result, meta = {}) {
     show(el.progressPanel, false);
+    show(el.errorPanel, false);
+    show(el.inputPanel, false);
     show(el.resultSection, true);
 
+    el.resultSource.textContent = meta.source ? `来源：${meta.source}` : '';
+    el.reanalyzeBtn.hidden = !meta.canReanalyze;
+
     renderSummary(result.stats || {}, result);
-    renderSentences(result.sentences || []);
     renderTranslation(result.full_translation || '');
+    renderSentences(result.sentences || []);
     renderWords(result.words || []);
 
-    el.rawText.textContent = result.raw_text || '';
+    setText(el.rawText, result.raw_text || '');
 
-    el.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    switchResultTab('translation');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function renderSummary(stats, result) {
@@ -394,13 +514,27 @@
     });
   }
 
+  function renderTranslation(text) {
+    const hasText = !!text.trim();
+
+    setText(el.fullTranslation, text);
+    show(el.fullTranslation, hasText);
+    show(el.translationEmpty, !hasText);
+  }
+
   function renderSentences(sentences) {
     el.sentences.replaceChildren();
-    el.sentenceCount.textContent = sentences.length ? `共 ${sentences.length} 句` : '';
+    el.tabCountGrammar.textContent = sentences.length ? String(
+      sentences.reduce((sum, s) => sum + (s.grammar_points || []).length, 0)
+    ) : '';
 
     if (!sentences.length) {
-      const empty = make('p', 'word-body', '本次未解析出句子。');
-      el.sentences.appendChild(empty);
+      el.sentences.appendChild(
+        buildEmptyNote(
+          '本次输入没有可解析的完整句子。',
+          '如果是单个单词或词组，可以到「单词精讲」页签查看详细词卡。'
+        )
+      );
       return;
     }
 
@@ -437,6 +571,19 @@
 
       el.sentences.appendChild(card);
     });
+  }
+
+  function buildEmptyNote(title, hint) {
+    const box = make('div', 'panel');
+    box.appendChild(make('p', 'empty-note', title));
+    if (hint) {
+      const sub = make('p', 'empty-note');
+      sub.style.paddingTop = '0';
+      sub.style.fontSize = '13px';
+      sub.textContent = hint;
+      box.appendChild(sub);
+    }
+    return box;
   }
 
   /**
@@ -527,21 +674,14 @@
     return item;
   }
 
-  function renderTranslation(text) {
-    if (!text) {
-      show(el.translationPanel, false);
-      return;
-    }
-    show(el.translationPanel, true);
-    el.fullTranslation.textContent = text;
-  }
-
   function renderWords(words) {
     el.words.replaceChildren();
-    el.wordCountLabel.textContent = words.length ? `共 ${words.length} 个` : '';
+    el.tabCountVocabulary.textContent = words.length ? String(words.length) : '';
 
     if (!words.length) {
-      el.words.appendChild(make('p', 'word-body', '本次未生成词卡。'));
+      el.words.appendChild(
+        buildEmptyNote('本次未生成词卡。', '可以增加词卡数量后重新分析。')
+      );
       return;
     }
 
@@ -697,7 +837,215 @@
     return box;
   }
 
+  // ================================================================ 结果页签
+
+  function switchResultTab(name) {
+    el.resultTabs.forEach((tab) => {
+      tab.classList.toggle('active', tab.dataset.tab === name);
+    });
+
+    document.querySelectorAll('.tab-panel').forEach((panel) => {
+      show(panel, panel.dataset.panel === name);
+    });
+  }
+
+  el.resultTabs.forEach((tab) => {
+    tab.addEventListener('click', () => switchResultTab(tab.dataset.tab));
+  });
+
+  // ================================================================ 返回与重试
+
+  function goBackToInput() {
+    show(el.resultSection, false);
+    show(el.progressPanel, false);
+    show(el.errorPanel, false);
+    show(el.inputPanel, true);
+
+    switchMode(state.mode);
+
+    if (state.mode === 'image') {
+      show(el.preview, !!state.file);
+      show(el.dropzone, !state.file);
+    }
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  el.backBtn.addEventListener('click', goBackToInput);
+  el.errorBack.addEventListener('click', goBackToInput);
+
+  el.resetBtn.addEventListener('click', () => {
+    state.file = null;
+    el.fileInput.value = '';
+    el.previewImg.src = '';
+    show(el.preview, false);
+    show(el.dropzone, true);
+  });
+
+  el.reanalyzeBtn.addEventListener('click', () => {
+    const input = state.lastInput;
+    if (!input) {
+      goBackToInput();
+      return;
+    }
+
+    show(el.resultSection, false);
+
+    if (input.type === 'image' && input.file) {
+      analyzeImageFile(input.file, input.wordCount);
+    } else if (input.type === 'text' && input.text) {
+      analyzeTextContent(input.text, input.wordCount);
+    } else {
+      goBackToInput();
+    }
+  });
+
+  // ================================================================ 历史记录
+
+  function openDrawer() {
+    show(el.drawerOverlay, true);
+    show(el.historyDrawer, true);
+    loadHistory();
+  }
+
+  function closeDrawer() {
+    show(el.drawerOverlay, false);
+    show(el.historyDrawer, false);
+  }
+
+  el.historyOpen.addEventListener('click', openDrawer);
+  el.historyClose.addEventListener('click', closeDrawer);
+  el.drawerOverlay.addEventListener('click', closeDrawer);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.historyDrawer.hidden) closeDrawer();
+  });
+
+  async function loadHistory() {
+    el.historyList.replaceChildren(
+      make('p', 'history-empty', '加载中…')
+    );
+
+    try {
+      const resp = await fetch('/api/history?limit=100');
+      const data = await resp.json();
+
+      el.historyTotal.textContent = data.total ? `（${data.total}）` : '';
+      renderHistoryList(data.items || []);
+    } catch (err) {
+      el.historyList.replaceChildren(
+        make('p', 'history-empty', '加载失败，请稍后重试。')
+      );
+    }
+  }
+
+  function renderHistoryList(items) {
+    el.historyList.replaceChildren();
+
+    if (!items.length) {
+      el.historyList.appendChild(
+        make('p', 'history-empty', '还没有分析记录。\n分析过的内容会自动保存在这里。')
+      );
+      return;
+    }
+
+    items.forEach((item) => {
+      el.historyList.appendChild(buildHistoryItem(item));
+    });
+  }
+
+  function buildHistoryItem(item) {
+    const box = make('div', 'history-item');
+
+    const top = make('div', 'history-top');
+    const kind = make('span', 'history-kind',
+      item.kind === 'image' ? '图片' : '文本');
+    kind.dataset.kind = item.kind;
+    top.appendChild(kind);
+    top.appendChild(make('span', 'history-time', item.created_at));
+    box.appendChild(top);
+
+    box.appendChild(make('p', 'history-preview', item.preview || '（无内容）'));
+    box.appendChild(make('p', 'history-summary', item.summary));
+
+    // 删除按钮（阻止冒泡，避免触发加载）
+    const del = make('button', 'history-delete', '✕');
+    del.title = '删除这条记录';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteHistoryItem(item.id, box);
+    });
+    box.appendChild(del);
+
+    box.addEventListener('click', () => loadHistoryDetail(item.id));
+
+    return box;
+  }
+
+  async function loadHistoryDetail(id) {
+    try {
+      const resp = await fetch(`/api/history/${id}`);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.message || `加载失败（HTTP ${resp.status}）`);
+      }
+
+      const record = await resp.json();
+      closeDrawer();
+
+      renderResult(record.result || {}, {
+        source: record.source,
+        // 历史记录没有原始文件，无法直接重跑
+        canReanalyze: false,
+      });
+    } catch (err) {
+      alert('加载历史记录失败：' + escapeForAlert(err.message));
+    }
+  }
+
+  async function deleteHistoryItem(id, node) {
+    try {
+      const resp = await fetch(`/api/history/${id}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error('删除失败');
+
+      node.remove();
+
+      // 如果列表空了，重新渲染空状态
+      if (!el.historyList.children.length) {
+        renderHistoryList([]);
+      }
+      refreshHistoryBadge();
+    } catch (err) {
+      alert('删除失败，请稍后重试。');
+    }
+  }
+
+  el.historyClear.addEventListener('click', async () => {
+    if (!confirm('确定清空全部历史记录？此操作不可恢复。')) return;
+
+    try {
+      await fetch('/api/history', { method: 'DELETE' });
+      renderHistoryList([]);
+      el.historyTotal.textContent = '';
+      refreshHistoryBadge();
+    } catch (err) {
+      alert('清空失败，请稍后重试。');
+    }
+  });
+
+  async function refreshHistoryBadge() {
+    try {
+      const resp = await fetch('/api/history?limit=1');
+      const data = await resp.json();
+
+      const total = data.total || 0;
+      el.historyBadge.textContent = total > 99 ? '99+' : String(total);
+      show(el.historyBadge, total > 0);
+    } catch (_) { /* 忽略 */ }
+  }
+
   // ================================================================ 启动
 
-  checkHealth();
+  checkHealth().then(() => refreshHistoryBadge());
+  updateTextCounter();
 })();

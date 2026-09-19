@@ -14,49 +14,91 @@
       <span class="brand-mark">EW</span>
       <div class="brand-text">
         <h1>English-Windish</h1>
-        <p>拍一张照片 · 语法解析 + 单词精讲</p>
+        <p>拍照或输入文本 · 语法解析 + 单词精讲</p>
       </div>
     </div>
-    <div class="status" id="status">
-      <span class="dot dot-idle"></span>
-      <span id="status-text">检查中…</span>
+    <div class="topbar-actions">
+      <div class="status" id="status">
+        <span class="dot dot-idle"></span>
+        <span id="status-text">检查中…</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="history-open">
+        历史记录
+        <span class="badge" id="history-badge" hidden></span>
+      </button>
     </div>
   </div>
 </header>
 
 <main class="wrap">
 
-  <!-- ============ 上传区 ============ -->
-  <section class="panel upload-panel" id="upload-panel">
-    <div class="dropzone" id="dropzone" tabindex="0" role="button"
-         aria-label="上传英语文本图片">
-      <div class="dropzone-icon">📷</div>
-      <h2>上传英语文本图片</h2>
-      <p class="dropzone-hint">
-        把试卷、教材、习题的照片<b>拖到这里</b>，或<b>点击选择文件</b>
-      </p>
-      <p class="dropzone-sub">支持 JPG / PNG / WEBP / BMP，单张不超过 10 MB</p>
-      <input type="file" id="file-input" accept="image/*" hidden>
+  <!-- ==================== 输入区 ==================== -->
+  <section class="panel input-panel" id="input-panel">
+
+    <div class="mode-tabs" role="tablist">
+      <button class="mode-tab active" data-mode="image" role="tab">
+        <span class="mode-icon">📷</span>
+        上传图片
+      </button>
+      <button class="mode-tab" data-mode="text" role="tab">
+        <span class="mode-icon">⌨️</span>
+        输入文本
+      </button>
     </div>
 
-    <div class="preview" id="preview" hidden>
-      <img id="preview-img" alt="待分析的图片预览">
-      <div class="preview-side">
-        <p class="preview-name" id="preview-name"></p>
-        <p class="preview-meta" id="preview-meta"></p>
-        <label class="field">
-          <span>生成词卡数量</span>
-          <input type="number" id="word-count" value="8" min="3" max="15" step="1">
-        </label>
-        <div class="preview-actions">
-          <button class="btn btn-primary" id="analyze-btn">开始分析</button>
-          <button class="btn btn-ghost" id="reset-btn">换一张</button>
+    <!-- ---- 图片模式 ---- -->
+    <div class="mode-body" id="mode-image">
+      <div class="dropzone" id="dropzone" tabindex="0" role="button"
+           aria-label="上传英语文本图片">
+        <div class="dropzone-icon">📷</div>
+        <h2>上传英语文本图片</h2>
+        <p class="dropzone-hint">
+          把试卷、教材、习题的照片<b>拖到这里</b>，或<b>点击选择文件</b>
+        </p>
+        <p class="dropzone-sub">支持 JPG / PNG / WEBP / BMP，单张不超过 10 MB</p>
+        <input type="file" id="file-input" accept="image/*" hidden>
+      </div>
+
+      <div class="preview" id="preview" hidden>
+        <img id="preview-img" alt="待分析的图片预览">
+        <div class="preview-side">
+          <p class="preview-name" id="preview-name"></p>
+          <p class="preview-meta" id="preview-meta"></p>
+          <label class="field">
+            <span>生成词卡数量</span>
+            <input type="number" id="word-count" value="8" min="3" max="15" step="1">
+          </label>
+          <div class="preview-actions">
+            <button class="btn btn-primary" id="analyze-btn">开始分析</button>
+            <button class="btn btn-ghost" id="reset-btn">换一张</button>
+          </div>
         </div>
       </div>
     </div>
+
+    <!-- ---- 文本模式 ---- -->
+    <div class="mode-body" id="mode-text" hidden>
+      <textarea id="text-input" class="text-input" rows="8"
+        placeholder="输入英文单词、词组、句子或段落，例如：&#10;&#10;单词：  accommodate&#10;词组：  take advantage of&#10;句子：  The book which I bought yesterday is interesting."></textarea>
+
+      <div class="text-meta">
+        <span class="text-counter" id="text-counter">0 字符</span>
+        <span class="text-hint">支持单词 / 词组 / 句子 / 段落，上限 20000 字符</span>
+      </div>
+
+      <div class="text-actions">
+        <label class="field field-inline">
+          <span>词卡数量</span>
+          <input type="number" id="text-word-count" value="8" min="3" max="15" step="1">
+        </label>
+        <button class="btn btn-primary" id="text-analyze-btn">开始分析</button>
+        <button class="btn btn-ghost" id="text-clear-btn">清空</button>
+      </div>
+    </div>
+
   </section>
 
-  <!-- ============ 进度区 ============ -->
+  <!-- ==================== 进度 ==================== -->
   <section class="panel progress-panel" id="progress-panel" hidden>
     <div class="progress-head">
       <span class="spinner"></span>
@@ -68,43 +110,56 @@
     <ol class="progress-steps" id="progress-steps"></ol>
   </section>
 
-  <!-- ============ 错误区 ============ -->
+  <!-- ==================== 错误 ==================== -->
   <section class="panel error-panel" id="error-panel" hidden>
     <h2>分析失败</h2>
     <pre id="error-message"></pre>
     <button class="btn btn-ghost" id="error-back">返回重试</button>
   </section>
 
-  <!-- ============ 结果区 ============ -->
+  <!-- ==================== 结果 ==================== -->
   <section id="result-section" hidden>
+
+    <div class="result-toolbar">
+      <button class="btn btn-ghost btn-sm" id="back-btn">← 返回</button>
+      <span class="result-source" id="result-source"></span>
+      <button class="btn btn-ghost btn-sm" id="reanalyze-btn">重新分析</button>
+    </div>
 
     <div class="summary-bar" id="summary-bar"></div>
 
-    <div class="result-grid">
+    <nav class="result-tabs" role="tablist">
+      <button class="result-tab active" data-tab="translation" role="tab">
+        全文翻译
+      </button>
+      <button class="result-tab" data-tab="grammar" role="tab">
+        语法解析
+        <span class="tab-count" id="tab-count-grammar"></span>
+      </button>
+      <button class="result-tab" data-tab="vocabulary" role="tab">
+        单词精讲
+        <span class="tab-count" id="tab-count-vocabulary"></span>
+      </button>
+    </nav>
 
-      <!-- 左：逐句解析 -->
-      <div class="column">
-        <h2 class="column-title">
-          逐句语法解析
-          <span class="column-sub" id="sentence-count"></span>
-        </h2>
-        <div id="sentences"></div>
-
-        <div class="panel translation-panel" id="translation-panel">
-          <h3>全文翻译</h3>
-          <p id="full-translation"></p>
-        </div>
+    <!-- ---- 全文翻译 ---- -->
+    <div class="tab-panel" data-panel="translation">
+      <div class="panel">
+        <p class="translation-text" id="full-translation"></p>
+        <p class="empty-note" id="translation-empty" hidden>
+          本次输入为单词或词组，没有完整的句子可翻译。
+        </p>
       </div>
+    </div>
 
-      <!-- 右：单词精讲 -->
-      <div class="column">
-        <h2 class="column-title">
-          单词精讲
-          <span class="column-sub" id="word-count-label"></span>
-        </h2>
-        <div id="words"></div>
-      </div>
+    <!-- ---- 语法解析 ---- -->
+    <div class="tab-panel" data-panel="grammar" hidden>
+      <div id="sentences"></div>
+    </div>
 
+    <!-- ---- 单词精讲 ---- -->
+    <div class="tab-panel" data-panel="vocabulary" hidden>
+      <div id="words"></div>
     </div>
 
     <details class="panel raw-panel">
@@ -122,6 +177,24 @@
     <span id="footer-config"></span>
   </div>
 </footer>
+
+<!-- ==================== 历史记录抽屉 ==================== -->
+<div class="drawer-overlay" id="drawer-overlay" hidden></div>
+
+<aside class="drawer" id="history-drawer" hidden aria-label="历史记录">
+  <div class="drawer-head">
+    <h2>历史记录 <span class="drawer-count" id="history-total"></span></h2>
+    <button class="icon-btn" id="history-close" aria-label="关闭">✕</button>
+  </div>
+
+  <div class="drawer-body" id="history-list"></div>
+
+  <div class="drawer-foot">
+    <button class="btn btn-ghost btn-sm btn-danger-ghost" id="history-clear">
+      清空全部记录
+    </button>
+  </div>
+</aside>
 
 <script src="/static/app.js"></script>
 </body>
