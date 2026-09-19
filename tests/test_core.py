@@ -31,6 +31,7 @@ from src.models import (  # noqa: E402
     WordEntry,
     WordForm,
 )
+from src.pipeline import IMAGE_STAGES, STAGES, TEXT_STAGES  # noqa: E402
 from src.report.generator import ReportGenerator  # noqa: E402
 
 
@@ -410,6 +411,35 @@ class TestGrammarValidation:
 # ======================================================================
 # 报告渲染
 # ======================================================================
+
+
+class TestPipelineStages:
+    """流水线的阶段定义。
+
+    图片链路 4 步、文本链路 3 步，两者不能混用——混用会让文本分析的
+    进度条出现「识别图片文字」这个根本不会执行的步骤，用户会以为卡住了。
+    """
+
+    def test_image_pipeline_has_four_stages(self):
+        assert len(IMAGE_STAGES) == 4
+        assert IMAGE_STAGES[0] == "识别图片文字"
+
+    def test_text_pipeline_skips_image_recognition(self):
+        assert len(TEXT_STAGES) == 3
+        assert "识别图片文字" not in TEXT_STAGES
+        assert TEXT_STAGES[0] == "分析语法结构"
+
+    def test_text_stages_are_tail_of_image_stages(self):
+        """文本阶段应当是图片阶段去掉第一步后的余下部分。
+
+        这条断言的作用是防止两套定义各自漂移：将来改了图片那侧的文案，
+        文本这边忘了同步，测试就会失败。
+        """
+        assert TEXT_STAGES == IMAGE_STAGES[1:]
+
+    def test_stages_alias_points_to_image(self):
+        """STAGES 是历史别名，必须指向图片阶段。"""
+        assert STAGES is IMAGE_STAGES
 
 
 class TestReportGenerator:

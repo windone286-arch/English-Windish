@@ -130,10 +130,10 @@
 
     <nav class="result-tabs" role="tablist">
       <button class="result-tab active" data-tab="translation" role="tab">
-        全文翻译
+        <span id="tab-label-translation">全文翻译</span>
       </button>
       <button class="result-tab" data-tab="grammar" role="tab">
-        语法解析
+        <span id="tab-label-grammar">语法解析</span>
         <span class="tab-count" id="tab-count-grammar"></span>
       </button>
       <button class="result-tab" data-tab="vocabulary" role="tab">
@@ -142,12 +142,13 @@
       </button>
     </nav>
 
-    <!-- ---- 全文翻译 ---- -->
+    <!-- ---- 全文翻译 / 释义 ---- -->
+    <!-- 标题由 JS 按输入粒度改写：句子/段落显示「全文翻译」，单词/词组显示「释义」 -->
     <div class="tab-panel" data-panel="translation">
       <div class="panel">
         <p class="translation-text" id="full-translation"></p>
         <p class="empty-note" id="translation-empty" hidden>
-          本次输入为单词或词组，没有完整的句子可翻译。
+          本次输入没有可翻译的内容。
         </p>
       </div>
     </div>

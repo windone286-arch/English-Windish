@@ -70,6 +70,8 @@
     reanalyzeBtn: $('reanalyze-btn'),
     summaryBar: $('summary-bar'),
     resultTabs: document.querySelectorAll('.result-tab'),
+    tabLabelTranslation: $('tab-label-translation'),
+    tabLabelGrammar: $('tab-label-grammar'),
     tabCountGrammar: $('tab-count-grammar'),
     tabCountVocabulary: $('tab-count-vocabulary'),
     fullTranslation: $('full-translation'),
@@ -469,18 +471,47 @@
 
   // ================================================================ 结果渲染
 
+  /**
+   * 判断输入粒度：单词 / 词组 / 句子。
+   *
+   * 为什么要判断？因为「全文翻译」这个标题只对句子和段落成立。
+   * 输入 accommodate 时，结果里的 translation 是词义（容纳；适应…），
+   * 叫「全文翻译」名不副实。
+   *
+   * 判断依据是原文本的形态，而不是模型输出。
+   * 模型的 structure 字段虽然也会说明「仅为词条」，但那是它的判断，可能不准；
+   * 「有没有句子标点、一共几个词」是客观事实，判断更稳。
+   */
+  function detectInputKind(rawText) {
+    const text = (rawText || '').trim();
+    if (!text) return 'sentence';
+
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+    const hasSentenceMark = /[.!?;:。！？；：]/.test(text);
+    const hasLineBreak = /\r?\n/.test(text);
+
+    if (hasSentenceMark || hasLineBreak || wordCount > 5) return 'sentence';
+    return wordCount <= 1 ? 'word' : 'phrase';
+  }
+
   function renderResult(result, meta = {}) {
     show(el.progressPanel, false);
     show(el.errorPanel, false);
     show(el.inputPanel, false);
     show(el.resultSection, true);
 
+    const inputKind = detectInputKind(result.raw_text);
+    const isWordLike = inputKind === 'word' || inputKind === 'phrase';
+
+    // 标题跟着输入粒度走：单词/词组叫「释义」，句子/段落才叫「全文翻译」
+    setText(el.tabLabelTranslation, isWordLike ? '释义' : '全文翻译');
+
     el.resultSource.textContent = meta.source ? `来源：${meta.source}` : '';
     el.reanalyzeBtn.hidden = !meta.canReanalyze;
 
-    renderSummary(result.stats || {}, result);
+    renderSummary(result.stats || {}, result, inputKind);
     renderTranslation(result.full_translation || '');
-    renderSentences(result.sentences || []);
+    renderSentences(result.sentences || [], inputKind);
     renderWords(result.words || []);
 
     setText(el.rawText, result.raw_text || '');
@@ -490,15 +521,24 @@
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  function renderSummary(stats, result) {
+  function renderSummary(stats, result, inputKind = 'sentence') {
     el.summaryBar.replaceChildren();
 
-    const items = [
-      ['句子', stats.sentence_count ?? (result.sentences || []).length],
-      ['语法点', stats.grammar_count ?? 0],
-      ['生词', stats.word_count ?? (result.words || []).length],
-      ['搭配例句', stats.collocation_count ?? 0],
-    ];
+    const isWordLike = inputKind === 'word' || inputKind === 'phrase';
+
+    // 单词/词组输入时，句子数和语法点必然是 0（没有句子可分析），
+    // 摆在概览栏里只会让人以为哪里出错了，所以直接不显示这两项。
+    const items = isWordLike
+      ? [
+          ['生词', stats.word_count ?? (result.words || []).length],
+          ['搭配例句', stats.collocation_count ?? 0],
+        ]
+      : [
+          ['句子', stats.sentence_count ?? (result.sentences || []).length],
+          ['语法点', stats.grammar_count ?? 0],
+          ['生词', stats.word_count ?? (result.words || []).length],
+          ['搭配例句', stats.collocation_count ?? 0],
+        ];
 
     // 按语法类型分别统计
     const typeCounts = stats.grammar_types || {};
@@ -522,8 +562,25 @@
     show(el.translationEmpty, !hasText);
   }
 
-  function renderSentences(sentences) {
+  function renderSentences(sentences, inputKind = 'sentence') {
     el.sentences.replaceChildren();
+
+    // 单词/词组输入没有句子结构可分析。
+    // 这里必须提前拦截：模型会把单词本身当成「一个句子」返回
+    // （structure 写着「单个动词，无句子主干」），
+    // 如果照常渲染，用户看到的是一个语法点为 0 的空卡片，像是分析失败了。
+    if (inputKind === 'word' || inputKind === 'phrase') {
+      el.tabCountGrammar.textContent = '';
+      el.sentences.appendChild(
+        buildEmptyNote(
+          `本次输入是${inputKind === 'word' ? '单词' : '词组'}，没有句子结构可分析。`,
+          '语法标注针对的是句子成分，比如从句、倒装、固定搭配在句中的位置。'
+          + '要看这个单词或词组的用法和例句，请到「单词精讲」页签。'
+        )
+      );
+      return;
+    }
+
     el.tabCountGrammar.textContent = sentences.length ? String(
       sentences.reduce((sum, s) => sum + (s.grammar_points || []).length, 0)
     ) : '';

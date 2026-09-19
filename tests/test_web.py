@@ -11,8 +11,10 @@ Web 接口测试。
 from __future__ import annotations
 
 import io
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,7 +73,8 @@ class TestHealth:
         assert "status" in data
         assert "vision_provider" in data
         assert "text_provider" in data
-        assert "stages" in data
+        assert "image_stages" in data
+        assert "text_stages" in data
 
     def test_health_status_reflects_config(self):
         """配置完整时 status 为 ok，否则为 config_error。"""
@@ -83,10 +86,17 @@ class TestHealth:
         else:
             assert data["status"] == "ok"
 
-    def test_health_lists_stages(self):
+    def test_health_lists_both_stage_sets(self):
+        """图片和文本的阶段必须分开返回。"""
         data = client.get("/api/health").json()
-        assert len(data["stages"]) == 4
-        assert data["stages"][0] == "识别图片文字"
+
+        assert len(data["image_stages"]) == 4
+        assert data["image_stages"][0] == "识别图片文字"
+
+        # 文本链路没有图片识别这一步，不能带上
+        assert len(data["text_stages"]) == 3
+        assert data["text_stages"][0] == "分析语法结构"
+        assert "识别图片文字" not in data["text_stages"]
 
 
 # ======================================================================
@@ -193,6 +203,15 @@ def _fake_analyze_text(text, word_count=8, no_words=False, on_progress=None):
     return result
 
 
+def _parse_events(body: str) -> list[dict]:
+    """把 SSE 响应体解析成事件列表，便于断言。"""
+    return [
+        json.loads(line[6:])
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
 def _use_temp_store(monkeypatch, tmp_path):
     """把历史存储指向临时数据库，避免污染真实数据。"""
     from src.storage import HistoryStore
@@ -200,6 +219,73 @@ def _use_temp_store(monkeypatch, tmp_path):
     store = HistoryStore(db_path=tmp_path / "web_test.db")
     monkeypatch.setattr("src.web.app.get_history_store", lambda: store)
     return store
+
+
+# ======================================================================
+# 进度阶段
+#
+# 这里覆盖的是一个真实出现过的 bug：图片和文本起初共用同一份阶段常量，
+# 于是文本分析的进度条第一步显示「识别图片文字」——而那一步根本不会执行。
+# 阶段文案必须和实际执行的步骤严格对应。
+# ======================================================================
+
+
+class TestStreamStages:
+    def test_text_stream_excludes_image_stage(self, monkeypatch, tmp_path):
+        _use_temp_store(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.web.app.analyze_text", _fake_analyze_text)
+
+        resp = client.post("/api/analyze-text", data={"text": "Hello world."})
+        start = _parse_events(resp.text)[0]
+
+        assert start["type"] == "start"
+        assert start["total"] == 3
+        assert len(start["stages"]) == 3
+        assert start["stages"][0] == "分析语法结构"
+        assert "识别图片文字" not in start["stages"]
+
+    def test_text_progress_total_matches_stages(self, monkeypatch, tmp_path):
+        """progress 事件的 total 必须和 start 声明的一致。"""
+        _use_temp_store(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.web.app.analyze_text", _fake_analyze_text)
+
+        resp = client.post("/api/analyze-text", data={"text": "Hello world."})
+        events = _parse_events(resp.text)
+
+        start = events[0]
+        steps = [e for e in events if e["type"] == "progress"]
+
+        assert steps, "至少要有一个 progress 事件"
+        for step in steps:
+            assert step["total"] == start["total"]
+
+    def test_image_stream_includes_image_stage(self, monkeypatch, tmp_path):
+        _use_temp_store(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.web.app._ensure_configured", lambda: None)
+        monkeypatch.setattr(
+            "src.web.app.get_config",
+            lambda: SimpleNamespace(upload_dir=tmp_path / "uploads"),
+        )
+
+        def fake_analyze_image(
+            image_path, word_count=8, text_only=False, no_words=False, on_progress=None
+        ):
+            from src.models import AnalysisResult
+
+            if on_progress:
+                on_progress(1, 4, "识别图片文字")
+            return AnalysisResult(created_at="2026-09-19 12:00:00", raw_text="stub")
+
+        monkeypatch.setattr("src.web.app.analyze_image", fake_analyze_image)
+
+        resp = client.post(
+            "/api/analyze",
+            files={"file": ("page.png", b"\x89PNG\r\n\x1a\n" + b"0" * 64, "image/png")},
+        )
+        start = _parse_events(resp.text)[0]
+
+        assert start["total"] == 4
+        assert start["stages"][0] == "识别图片文字"
 
 
 class TestAnalyzeText:
@@ -382,6 +468,21 @@ class TestPageStructure:
         assert 'id="history-drawer"' in html
         assert 'id="history-open"' in html
         assert 'id="history-list"' in html
+
+    def test_css_declares_hidden_rule(self):
+        """[hidden] 必须在 CSS 里显式声明 display:none。
+
+        这条断言锁住一个踩过的坑：浏览器默认的 `[hidden] { display: none }`
+        属于优先级最低的用户代理样式，只要作者样式表里给同一元素写了
+        display（比如 `.drawer { display: flex }`），hidden 就会完全失效。
+        后果是历史记录抽屉关不掉，一直挂在页面右侧。
+
+        app.js 里所有显隐都靠 hidden 属性控制，所以这条规则一旦丢失，
+        整个界面的显隐逻辑都会坏掉。
+        """
+        css = client.get("/static/style.css").text
+        assert "[hidden]" in css
+        assert "display: none !important" in css
 
     def test_js_references_existing_ids(self):
         """JS 里用 $('xxx') 取的元素，HTML 里必须存在。

@@ -45,7 +45,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.config import get_config
 from src.llm_client import LLMError
-from src.pipeline import STAGES, analyze_image, analyze_text
+from src.pipeline import IMAGE_STAGES, TEXT_STAGES, analyze_image, analyze_text
 from src.storage import KIND_IMAGE, KIND_TEXT, get_history_store
 
 # 项目根目录
@@ -97,7 +97,8 @@ async def health() -> dict:
         "vision_model": config.vision_model,
         "text_provider": config.text_provider,
         "text_model": config.text_model,
-        "stages": STAGES,
+        "image_stages": IMAGE_STAGES,
+        "text_stages": TEXT_STAGES,
         "problems": [p.replace("\n", " ") for p in problems],
     }
 
@@ -116,12 +117,18 @@ JobRunner = Callable[[Callable[[int, int, str], None]], dict[str, Any]]
 def _build_event_stream(
     run_job: JobRunner,
     start_payload: dict[str, Any],
+    stages: list[str],
 ) -> StreamingResponse:
     """构造一个 SSE 响应。
 
     Args:
         run_job: 在工作线程里执行的函数，接收进度回调，返回最终 payload
         start_payload: start 事件的附加字段
+        stages: 本次任务实际会经历的阶段。
+
+            必须由调用方显式传入，不能用模块级常量兜底——
+            图片 4 步、文本 3 步，阶段文案写错会让进度条显示一个
+            根本不会执行的步骤，比没有进度条更让人困惑。
     """
 
     async def event_stream():
@@ -162,8 +169,8 @@ def _build_event_stream(
         yield _sse(
             {
                 "type": "start",
-                "total": len(STAGES),
-                "stages": STAGES,
+                "total": len(stages),
+                "stages": stages,
                 **start_payload,
             }
         )
@@ -282,7 +289,9 @@ async def analyze(
             "record_id": record_id,
         }
 
-    return _build_event_stream(run_job, {"kind": "image", "filename": original_name})
+    return _build_event_stream(
+        run_job, {"kind": "image", "filename": original_name}, IMAGE_STAGES
+    )
 
 
 # ======================================================================
@@ -332,7 +341,9 @@ async def analyze_text_endpoint(
             "record_id": record_id,
         }
 
-    return _build_event_stream(run_job, {"kind": "text", "filename": source})
+    return _build_event_stream(
+        run_job, {"kind": "text", "filename": source}, TEXT_STAGES
+    )
 
 
 # ======================================================================

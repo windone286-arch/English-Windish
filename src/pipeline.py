@@ -30,13 +30,28 @@ from src.vocabulary.tutor import VocabularyTutor
 # 进度回调的类型别名：(当前步骤, 总步骤数, 说明文字)
 ProgressCallback = Callable[[int, int, str], None]
 
-# 流水线的阶段定义，供前端展示进度条
-STAGES = [
+# 图片流水线的阶段定义，供前端展示进度条
+IMAGE_STAGES = [
     "识别图片文字",
     "分析语法结构",
     "生成单词词卡",
     "汇总分析结果",
 ]
+
+# 文本流水线的阶段定义。
+#
+# 为什么单独定义一份，而不是复用 IMAGE_STAGES？
+# 文本输入根本没有「图片」这一步，如果复用，前端进度条会显示
+# 「识别图片文字」这个永远不会执行的步骤，用户看了会以为卡住了。
+# 阶段文案必须和实际执行的步骤严格对应，否则进度条反而制造困惑。
+TEXT_STAGES = [
+    "分析语法结构",
+    "生成单词词卡",
+    "汇总分析结果",
+]
+
+# 向后兼容的别名（早期代码与 /api/health 都引用了这个名字）
+STAGES = IMAGE_STAGES
 
 
 def _noop(step: int, total: int, message: str) -> None:
@@ -63,7 +78,7 @@ def analyze_image(
         AnalysisResult
     """
     report = on_progress or _noop
-    total = len(STAGES)
+    total = len(IMAGE_STAGES)
 
     result = AnalysisResult(
         source_image=str(image_path),
@@ -71,7 +86,7 @@ def analyze_image(
     )
 
     # ---- 步骤 1：识别图片 ----
-    report(1, total, STAGES[0])
+    report(1, total, IMAGE_STAGES[0])
     recognizer = ImageRecognizer()
     result.raw_text = recognizer.recognize(image_path)
 
@@ -80,7 +95,7 @@ def analyze_image(
         return result
 
     # ---- 步骤 2：语法分析 ----
-    report(2, total, STAGES[1])
+    report(2, total, IMAGE_STAGES[1])
     analyzer = GrammarAnalyzer()
     sentences, translation = analyzer.analyze(result.raw_text)
     result.sentences = sentences
@@ -88,14 +103,14 @@ def analyze_image(
 
     # ---- 步骤 3：单词精讲 ----
     if not no_words:
-        report(3, total, STAGES[2])
+        report(3, total, IMAGE_STAGES[2])
         tutor = VocabularyTutor()
         result.words = tutor.process(result.raw_text, count=word_count)
     else:
         report(3, total, "已跳过单词精讲")
 
     # ---- 步骤 4：汇总 ----
-    report(4, total, STAGES[3])
+    report(4, total, IMAGE_STAGES[3])
     result.stats = _build_stats(result)
 
     return result
@@ -121,24 +136,25 @@ def analyze_text(
         AnalysisResult
     """
     report = on_progress or _noop
+    total = len(TEXT_STAGES)
 
     result = AnalysisResult(
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         raw_text=text,
     )
 
-    report(1, 3, "分析语法结构")
+    report(1, total, TEXT_STAGES[0])
     analyzer = GrammarAnalyzer()
     sentences, translation = analyzer.analyze(text)
     result.sentences = sentences
     result.full_translation = translation
 
     if not no_words:
-        report(2, 3, "生成单词词卡")
+        report(2, total, TEXT_STAGES[1])
         tutor = VocabularyTutor()
         result.words = tutor.process(text, count=word_count)
 
-    report(3, 3, "汇总分析结果")
+    report(3, total, TEXT_STAGES[2])
     result.stats = _build_stats(result)
 
     return result
