@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>English-Windish · 英语文本分析</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">EW</span>
+      <div class="brand-text">
+        <h1>English-Windish</h1>
+        <p>拍一张照片 · 语法解析 + 单词精讲</p>
+      </div>
+    </div>
+    <div class="status" id="status">
+      <span class="dot dot-idle"></span>
+      <span id="status-text">检查中…</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ============ 上传区 ============ -->
+  <section class="panel upload-panel" id="upload-panel">
+    <div class="dropzone" id="dropzone" tabindex="0" role="button"
+         aria-label="上传英语文本图片">
+      <div class="dropzone-icon">📷</div>
+      <h2>上传英语文本图片</h2>
+      <p class="dropzone-hint">
+        把试卷、教材、习题的照片<b>拖到这里</b>，或<b>点击选择文件</b>
+      </p>
+      <p class="dropzone-sub">支持 JPG / PNG / WEBP / BMP，单张不超过 10 MB</p>
+      <input type="file" id="file-input" accept="image/*" hidden>
+    </div>
+
+    <div class="preview" id="preview" hidden>
+      <img id="preview-img" alt="待分析的图片预览">
+      <div class="preview-side">
+        <p class="preview-name" id="preview-name"></p>
+        <p class="preview-meta" id="preview-meta"></p>
+        <label class="field">
+          <span>生成词卡数量</span>
+          <input type="number" id="word-count" value="8" min="3" max="15" step="1">
+        </label>
+        <div class="preview-actions">
+          <button class="btn btn-primary" id="analyze-btn">开始分析</button>
+          <button class="btn btn-ghost" id="reset-btn">换一张</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 进度区 ============ -->
+  <section class="panel progress-panel" id="progress-panel" hidden>
+    <div class="progress-head">
+      <span class="spinner"></span>
+      <span id="progress-label">正在分析…</span>
+    </div>
+    <div class="progress-track">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <ol class="progress-steps" id="progress-steps"></ol>
+  </section>
+
+  <!-- ============ 错误区 ============ -->
+  <section class="panel error-panel" id="error-panel" hidden>
+    <h2>分析失败</h2>
+    <pre id="error-message"></pre>
+    <button class="btn btn-ghost" id="error-back">返回重试</button>
+  </section>
+
+  <!-- ============ 结果区 ============ -->
+  <section id="result-section" hidden>
+
+    <div class="summary-bar" id="summary-bar"></div>
+
+    <div class="result-grid">
+
+      <!-- 左：逐句解析 -->
+      <div class="column">
+        <h2 class="column-title">
+          逐句语法解析
+          <span class="column-sub" id="sentence-count"></span>
+        </h2>
+        <div id="sentences"></div>
+
+        <div class="panel translation-panel" id="translation-panel">
+          <h3>全文翻译</h3>
+          <p id="full-translation"></p>
+        </div>
+      </div>
+
+      <!-- 右：单词精讲 -->
+      <div class="column">
+        <h2 class="column-title">
+          单词精讲
+          <span class="column-sub" id="word-count-label"></span>
+        </h2>
+        <div id="words"></div>
+      </div>
+
+    </div>
+
+    <details class="panel raw-panel">
+      <summary>查看识别的原文</summary>
+      <pre id="raw-text"></pre>
+    </details>
+
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <span>English-Windish · 基于多模态大模型</span>
+    <span id="footer-config"></span>
+  </div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

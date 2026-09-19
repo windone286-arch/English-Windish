@@ -203,6 +203,148 @@ HTTPS 的 TLS 握手容易被中间设备干扰，而 SSH 是二进制协议，�
 
 ---
 
+## 2026-09-19 · 阶段 2：Web 界面
+
+### 今日目标
+
+把命令行工具变成 Web 应用——关键是要能部署拿公开链接，
+面试官点开就能用。
+
+### 决策记录
+
+**1. 先重构，再加功能**
+
+阶段 1 的分析逻辑写在 `main.py` 里，如果 Web 版直接复制一份，
+就会出现「改了一处忘了另一处」的问题。所以先把流水线抽到
+`src/pipeline.py`，让 CLI 和 Web 共用。
+
+同时给流水线加了 `on_progress` 回调参数：
+
+```python
+def analyze_image(image_path, ..., on_progress: ProgressCallback | None = None)
+```
+
+这样「计算」和「怎么显示进度」就解耦了——
+命令行传一个打印到终端的回调，Web 传一个写队列的回调。
+
+**2. 用 SSE 而不是 WebSocket**
+
+分析耗时约 18 秒。没有进度反馈的话，用户会以为页面卡死了。
+
+对比两种方案：
+
+| | SSE | WebSocket |
+|---|---|---|
+| 通信方向 | 单向（服务器→客户端） | 双向 |
+| 协议 | HTTP | ws:// 独立协议 |
+| 浏览器 API | EventSource | WebSocket |
+| 断线重连 | 自动 | 需自己实现 |
+
+本场景是「提交任务 → 服务器单向推进度」，SSE 完全匹配。
+WebSocket 的双向能力用不上，属于过度设计。
+
+**3. 前端用 fetch 读流，不用 EventSource**
+
+`EventSource` 只支持 GET 请求，但上传文件必须用 POST。
+所以前端手动读流：
+
+```javascript
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const chunks = buffer.split('\n\n');
+  buffer = chunks.pop() || '';   // 最后一段可能不完整，留到下一轮
+  ...
+}
+```
+
+**这里有个容易踩的坑**：网络分块不保证落在事件边界上，
+一个 SSE 事件可能被切成两半。必须用 buffer 累积，
+按 `\n\n` 切分后把不完整的尾段留回去。
+
+**4. 时间轴精确性：所有用户数据用 textContent 写入**
+
+分析结果里包含从用户图片识别出的文字——属于**不可信输入**。
+如果拼 `innerHTML`，图片里的 `<script>` 就会被当作 HTML 执行。
+所以全部用 `createElement` + `textContent`。
+
+这不是洁癖，是必须做的。面试时讲这个点能体现安全意识。
+
+### 实现过程
+
+**后端（`src/web/app.py`）的关键设计**
+
+1. **后台线程 + 队列**
+   流水线是同步阻塞的（httpx 同步请求）。如果直接在 SSE 生成器里跑，
+   会卡住整个事件循环，其他请求全部排队。
+   所以用 `asyncio.to_thread` 丢到线程池，通过 `asyncio.Queue` 传回进度。
+
+2. **`call_soon_threadsafe` 不能省**
+   `asyncio.Queue` 不是线程安全的。进度回调在工作线程里执行，
+   必须用 `loop.call_soon_threadsafe` 把写队列的操作丢回事件循环线程。
+
+3. **上传文件用 uuid 重命名**
+   原始文件名可能有三个问题：
+   - 含路径分隔符导致目录穿越
+   - 中文文件名在不同系统上的编码问题
+   - 同名文件互相覆盖
+   所以保存为 `20260919_123133_80bb31d4.jpg` 这种格式。
+
+4. **`X-Accel-Buffering: no`**
+   部署在 nginx 后面时，不加这个头 SSE 会被缓冲成一坨，
+   进度推送就失去意义了。
+
+**前端（`src/web/static/`）的关键设计**
+
+1. **语法点高亮要处理重叠**
+   多个语法点的片段可能互相重叠。处理方式：按起点排序，
+   然后贪心保留不重叠的区间。
+   高亮只是视觉提示，完整解释在下方列表里，所以丢弃重叠部分不丢信息。
+
+2. **释义折叠**
+   默认展示 2-3 条高频义项，点击展开按词性分组的完整释义。
+
+3. **语法类型用颜色 + 文字双重标识**
+   只靠颜色区分对色觉障碍用户不友好，所以同时有文字标签。
+
+### 踩坑记录
+
+1. **`asyncio.Queue` 跨线程写入**
+   最初直接在回调里 `queue.put_nowait(...)`，导致事件偶尔丢失。
+   根因是 asyncio 对象不线程安全，必须用 `call_soon_threadsafe`。
+
+2. **`stream=True` 解码**
+   `TextDecoder.decode(value)` 不带 `{stream: true}` 时，
+   多字节的 UTF-8 字符被切在分块边界上会解码成乱码。
+   中文内容下这个问题很容易触发。
+
+### 今日产出
+
+- [x] `src/pipeline.py` —— 抽出的分析流水线，CLI 与 Web 共用
+- [x] `src/main.py` —— 重构为调用 pipeline
+- [x] `src/web/app.py` —— FastAPI 后端（SSE 流式进度）
+- [x] `src/web/static/index.html` —— 页面结构
+- [x] `src/web/static/style.css` —— 样式（浅色主题，响应式）
+- [x] `src/web/static/app.js` —— 交互逻辑
+- [x] `tests/test_web.py` —— 14 个 Web 接口测试
+- [x] **51 个测试全部通过**
+
+**实测验证**：
+- 服务启动正常，健康检查返回 `status: ok`
+- 上传接口返回 4 个进度事件 + 完整结果
+- 完整分析耗时约 18 秒
+- 无效格式 / 空文件 / 超大文件均被正确拒绝
+
+### 下一步
+
+阶段 3：部署上线，拿到公开链接。
+
+---
+
 ## 模板（后续日期沿用）
 
 ```markdown

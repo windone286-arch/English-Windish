@@ -71,19 +71,40 @@
 
 ## 技术栈
 
-- **语言**：Python 3.13
-- **大模型**：多模态视觉模型（云端）+ 本地模型（后处理 / 缓存）
-- **后端框架**：FastAPI
-- **前端**：HTML / CSS / JavaScript
-- **数据存储**：SQLite（生词本、历史记录）
-- **部署**：待定
+| 层次 | 选型 | 说明 |
+|---|---|---|
+| 语言 | Python 3.13 | |
+| 视觉模型 | 通义千问 `qwen-vl-max` | DeepSeek 无视觉模型，故图片识别走通义 |
+| 文本模型 | DeepSeek `deepseek-chat` | 推理能力强，负责语法分析与单词精讲 |
+| 后端框架 | FastAPI | 原生 async，适配「等待外部 API 数十秒」的场景 |
+| 实时通信 | **SSE（Server-Sent Events）** | 分析耗时约 18 秒，需实时推送进度 |
+| 前端 | 原生 HTML / CSS / JavaScript | 无框架依赖，零构建步骤 |
+| 数据存储 | SQLite | 单词词卡缓存，避免重复查询 |
+| 部署 | 待定 | |
+
+### 为什么用 SSE 而不是 WebSocket
+
+本场景是**单向推送**——客户端提交任务后，只有服务器往客户端推进度，
+客户端不需要在分析过程中发消息。SSE 正好匹配：
+
+- 基于 HTTP，无需额外的协议握手
+- 浏览器原生 `EventSource` 支持
+- 断线自动重连
+
+WebSocket 是双向协议，用在这里属于过度设计。
+
+### 为什么前端用 `fetch` 读流而不是 `EventSource`
+
+`EventSource` 只支持 GET 请求，但上传文件必须用 POST。
+所以前端用 `fetch` + `response.body.getReader()` 手动解析 SSE 流，
+并自行处理分块边界（一个事件可能被切成两半）。
 
 ## 开发进度
 
 - [x] 阶段 0：环境搭建、GitHub 仓库初始化
-- [ ] 阶段 1：核心功能（命令行版跑通全链路）
-- [ ] 阶段 2：Web 界面 + 部署上线
-- [ ] 阶段 3：性能优化、缓存策略、文档完善
+- [x] 阶段 1：核心功能（命令行版跑通全链路）
+- [x] 阶段 2：Web 界面 + SSE 实时进度
+- [ ] 阶段 3：部署上线、性能优化、文档完善
 
 ## 项目结构
 
@@ -93,40 +114,100 @@ English-Windish/
 ├── requirements.txt       # Python 依赖
 ├── .gitignore             # Git 忽略规则
 ├── .env.example           # 环境变量模板（真实 key 不入库）
-├── src/                   # 源码
-│   ├── __init__.py
-│   ├── ocr/               # 图像识别模块
-│   ├── grammar/           # 语法解析模块
-│   ├── vocabulary/        # 单词精讲模块
-│   └── report/            # 报告生成模块
-├── data/                  # 数据（样例图片、词库缓存）
-├── docs/                  # 文档
-└── tests/                 # 测试
+├── src/
+│   ├── config.py          # 配置管理（双轨：视觉服务商 + 文本服务商）
+│   ├── models.py          # 数据模型定义
+│   ├── prompts.py         # Prompt 模板集中管理
+│   ├── llm_client.py      # 大模型调用封装（多服务商 + JSON 容错 + 重试）
+│   ├── pipeline.py        # 分析流水线（CLI 与 Web 共用）
+│   ├── main.py            # 命令行入口
+│   ├── ocr/               # 图像识别
+│   ├── grammar/           # 语法解析
+│   ├── vocabulary/        # 单词精讲（含 SQLite 缓存）
+│   ├── report/            # 报告渲染（Markdown / JSON）
+│   └── web/               # Web 应用
+│       ├── app.py         # FastAPI 后端（SSE 流式进度）
+│       └── static/        # 前端（原生 HTML/CSS/JS）
+├── data/
+│   ├── samples/           # 示例图片
+│   ├── uploads/           # 用户上传（.gitignore 排除）
+│   └── reports/           # 生成的分析报告
+├── docs/
+│   └── devlog.md          # 开发日志（含决策记录与踩坑复盘）
+└── tests/                 # 测试（51 个，不依赖真实 API）
 ```
 
 ## 快速开始
 
-> 开发中，环境搭建完成后更新本节。
+### 1. 环境准备
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/windone286-arch/English-Windish.git
+git clone git@github.com:windone286-arch/English-Windish.git
 cd English-Windish
 
-# 2. 创建虚拟环境
+# 创建虚拟环境
 python -m venv .venv
 
-# 3. 激活虚拟环境（Windows）
+# 激活（Windows）
 .venv\Scripts\activate
 
-# 4. 安装依赖
+# 安装依赖
 pip install -r requirements.txt
+```
 
-# 5. 配置 API Key（复制 .env.example 为 .env，填入自己的 key）
+### 2. 配置 API Key
+
+```bash
 copy .env.example .env
+```
 
-# 6. 运行
-python -m src.main
+编辑 `.env`，填入你的密钥：
+
+```ini
+# 视觉：负责图片识别（DeepSeek 没有视觉模型，必须用通义或智谱）
+VISION_PROVIDER=dashscope
+DASHSCOPE_API_KEY=sk-你的通义key
+
+# 文本：负责语法分析与单词精讲
+TEXT_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-你的deepseek key
+```
+
+> `.env` 已被 `.gitignore` 排除，不会被提交。
+
+### 3. 运行
+
+**Web 界面（推荐）**
+
+```bash
+python -m src.web.app
+```
+
+打开 http://127.0.0.1:8000
+
+**命令行**
+
+```bash
+# 分析图片
+python -m src.main data/samples/test1.jpg
+
+# 指定词卡数量
+python -m src.main data/samples/test1.jpg --words 10
+
+# 只识别文字（省 API 额度，用于快速验证图片质量）
+python -m src.main data/samples/test1.jpg --text-only
+
+# 直接分析文本，跳过图片识别（调试 Prompt 用）
+python -m src.main --text "The book which I bought yesterday is interesting."
+
+# 输出 JSON
+python -m src.main data/samples/test1.jpg --json
+```
+
+### 4. 运行测试
+
+```bash
+pytest tests/ -v
 ```
 
 ## 开发日志
