@@ -280,11 +280,32 @@ if STATIC_DIR.exists():
 
 
 def main() -> int:
-    """直接运行本模块时启动开发服务器。"""
+    """启动服务。
+
+    两种运行模式：
+
+    - **本地开发**：监听 127.0.0.1:8000。
+      绑定到回环地址而不是 0.0.0.0 是有意的——避免把开发中的服务
+      暴露给同一局域网内的其他设备（比如校园网里的陌生人）。
+
+    - **云端部署**：平台会注入 PORT 环境变量，此时监听 0.0.0.0:$PORT。
+      容器环境下必须绑定 0.0.0.0，否则容器外无法访问。
+    """
+    import os
+
     import uvicorn
 
+    port_env = os.getenv("PORT")
+    if port_env:
+        host, port = "0.0.0.0", int(port_env)
+        is_deploy = True
+    else:
+        host, port = "127.0.0.1", 8000
+        is_deploy = False
+
     config = get_config()
-    if config.debug:
+
+    if not is_deploy:
         print("=" * 60)
         print("  English-Windish Web")
         print("=" * 60)
@@ -295,10 +316,15 @@ def main() -> int:
             print("\n  ⚠ 配置问题：")
             for p in problems:
                 print(f"    - {p.replace(chr(10), ' ')}")
-        print("\n  访问：http://127.0.0.1:8000")
+        print(f"\n  访问：http://{host}:{port}")
         print("=" * 60)
 
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info" if config.debug else "warning",
+    )
     return 0
 
 
